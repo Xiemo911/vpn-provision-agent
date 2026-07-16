@@ -1,0 +1,8 @@
+{
+  "server_url": "https://panel.example.com",
+  "agent_id": "",
+  "token": "REPLACE_WITH_PER_AGENT_TOKEN",
+  "poll_interval_seconds": 60,
+  "xray_config_path": "/usr/local/etc/xray/config.json",
+  "allow_run_command": false
+}

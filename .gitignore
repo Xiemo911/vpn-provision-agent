@@ -1,0 +1,8 @@
+# Build artifacts
+/vpn-agent
+/vpn-agent.exe
+*.tmp
+
+# Local config that may contain secrets
+config.json
+!deploy/config.example.json

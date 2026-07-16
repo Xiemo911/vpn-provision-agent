@@ -1,0 +1,19 @@
+[Unit]
+Description=VPN Provisioning Agent
+Documentation=https://github.com/Xiemo911/vpn-provision-agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/vpn-agent --config /etc/vpn-agent/config.json
+Restart=always
+RestartSec=10
+# The agent manages xray via systemctl and edits /usr/local/etc/xray, so it
+# needs root. Tighten these if you scope its privileges differently.
+User=root
+AmbientCapabilities=
+NoNewPrivileges=false
+
+[Install]
+WantedBy=multi-user.target
