@@ -41,6 +41,6 @@ func main() {
 
 	a := agent.New(cfg, version, hostname)
 	if err := a.Run(ctx); err != nil {
-		log.Fatalf("agent errorr: %v", err)
+		log.Fatalf("agent errorrr: %v", err)
 	}
 }
