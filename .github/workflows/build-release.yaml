@@ -1,12 +1,12 @@
 name: Build and Release Binaries
 
-"on":
+on:
   push:
     tags:
-      - 'v*'
+      - 'v*'   # triggers on tags like v1.0.0, v1.2.3, etc.
 
 permissions:
-  contents: write
+  contents: write   # needed so the workflow can create a release
 
 jobs:
   build:
@@ -57,4 +57,5 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: bin/*
+          # tag_name is omitted on purpose — it defaults to the pushed tag (e.g. v1.2.3)
           generate_release_notes: true
