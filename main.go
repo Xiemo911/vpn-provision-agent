@@ -31,7 +31,7 @@ func main() {
 
 	cfg, err := config.Load(*configPath)
 	if err != nil {
-		log.Fatalf("config error: %v", err)
+		log.Fatalf("config errorr: %v", err)
 	}
 
 	hostname, _ := os.Hostname()
@@ -41,6 +41,6 @@ func main() {
 
 	a := agent.New(cfg, version, hostname)
 	if err := a.Run(ctx); err != nil {
-		log.Fatalf("agent errorrr: %v", err)
+		log.Fatalf("agent error: %v", err)
 	}
 }
