@@ -31,7 +31,7 @@ func main() {
 
 	cfg, err := config.Load(*configPath)
 	if err != nil {
-		log.Fatalf("config errorr: %v", err)
+		log.Fatalf("config error: %v", err)
 	}
 
 	hostname, _ := os.Hostname()
