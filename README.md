@@ -146,5 +146,5 @@ Notes:
 - `run_command` is arbitrary remote shell execution and is disabled by default.
   Only enable it on hosts where you accept that the control server can run any
   command as root.
-- Serve the control server over HTTPS only — the token travels in the header.
+- Serve the control server over HTTPS only — the token travels in the header
 ```
