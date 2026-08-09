@@ -55,4 +55,5 @@ const (
 	ActionGetStatus      = "get_status"
 	ActionRunCommand     = "run_command"
 	ActionUninstallAgent = "uninstall_agent"
+	ActionUpdateAgent    = "update_agent"
 )

@@ -130,6 +130,7 @@ On failure, `success` is `false` and `error` holds the message.
 | `get_status`        | —                                                            | `AgentStatus`                   |
 | `run_command`       | `{ "command": "..." }` *(requires `allow_run_command`)*       | `{ "stdout", "stderr", "exit_code" }` |
 | `uninstall_agent`   | —                                                            | `{ "status": "uninstall scheduled" }` |
+| `update_agent`      | `{ "url": "...", "sha256": "...", "version"? }`               | `{ "status": "update installed, restarting" }` |
 
 Notes:
 
@@ -144,6 +145,12 @@ Notes:
   process handling it, the actual teardown runs a couple seconds later as a
   detached `systemd-run` unit — this is a one-way trip, the VPS won't be
   manageable by this agent again until reinstalled by hand.
+- `update_agent` downloads `url`, verifies it against `sha256`, and replaces
+  the running binary. It then exits after a couple seconds (giving the
+  action result time to reach the control server) and relies on
+  `Restart=always` in `vpn-agent.service` to relaunch it as the new version.
+  The previous binary is kept alongside it as `vpn-agent.bak` for manual
+  rollback.
 
 ## Security notes
 
@@ -156,4 +163,9 @@ Notes:
 - `uninstall_agent` is irreversible and self-destructive: it removes Xray,
   the systemd service, the binary, and `/etc/vpn-agent`. Once it runs, the
   control server has no way to reach that VPS again.
+- `update_agent` runs whatever binary is at `url` as root on every VPS that
+  receives the action. The `sha256` check only guards against corruption or a
+  compromised transport, not a malicious control server — treat the ability
+  to issue this action as equivalent to root on the fleet, same as
+  `run_command`.
 ```

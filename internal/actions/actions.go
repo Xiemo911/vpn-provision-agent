@@ -38,6 +38,7 @@ func NewDispatcher(cfg *config.Config, mgr *xray.Manager) *Dispatcher {
 		protocol.ActionGetStatus:      d.getStatus,
 		protocol.ActionRunCommand:     d.runCommand,
 		protocol.ActionUninstallAgent: d.uninstallAgent,
+		protocol.ActionUpdateAgent:    d.updateAgent,
 	}
 	return d
 }
