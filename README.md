@@ -129,6 +129,7 @@ On failure, `success` is `false` and `error` holds the message.
 | `apply_config`      | `{ "config": { ...full xray config... }, "restart"? }`       | `{ "applied": true }`           |
 | `get_status`        | —                                                            | `AgentStatus`                   |
 | `run_command`       | `{ "command": "..." }` *(requires `allow_run_command`)*       | `{ "stdout", "stderr", "exit_code" }` |
+| `uninstall_agent`   | —                                                            | `{ "status": "uninstall scheduled" }` |
 
 Notes:
 
@@ -138,6 +139,11 @@ Notes:
   immediately; set `false` to batch several changes and restart once at the end.
 - `apply_config` validates the new config with `xray -test` and rolls back to the
   previous file if validation fails.
+- `uninstall_agent` purges Xray, then stops/disables/removes the `vpn-agent`
+  systemd unit, config directory, and binary. Because it tears down the very
+  process handling it, the actual teardown runs a couple seconds later as a
+  detached `systemd-run` unit — this is a one-way trip, the VPS won't be
+  manageable by this agent again until reinstalled by hand.
 
 ## Security notes
 
@@ -147,4 +153,7 @@ Notes:
   Only enable it on hosts where you accept that the control server can run any
   command as root.
 - Serve the control server over HTTPS only — the token travels in the header.
+- `uninstall_agent` is irreversible and self-destructive: it removes Xray,
+  the systemd service, the binary, and `/etc/vpn-agent`. Once it runs, the
+  control server has no way to reach that VPS again.
 ```

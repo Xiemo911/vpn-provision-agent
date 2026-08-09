@@ -3,6 +3,6 @@
 /vpn-agent.exe
 *.tmp
 
-# Local config that may contain secrets
+# Local config that may contain secretsffg
 config.json
 !deploy/config.example.json

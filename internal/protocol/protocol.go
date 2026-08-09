@@ -45,13 +45,14 @@ type ActionResult struct {
 
 // Action type identifiers.
 const (
-	ActionInstallXray   = "install_xray"
-	ActionUninstallXray = "uninstall_xray"
-	ActionRestartXray   = "restart_xray"
-	ActionAddUser       = "add_vless_user"
-	ActionRemoveUser    = "remove_vless_user"
-	ActionListUsers     = "list_vless_users"
-	ActionApplyConfig   = "apply_config"
-	ActionGetStatus     = "get_status"
-	ActionRunCommand    = "run_command"
+	ActionInstallXray    = "install_xray"
+	ActionUninstallXray  = "uninstall_xray"
+	ActionRestartXray    = "restart_xray"
+	ActionAddUser        = "add_vless_user"
+	ActionRemoveUser     = "remove_vless_user"
+	ActionListUsers      = "list_vless_users"
+	ActionApplyConfig    = "apply_config"
+	ActionGetStatus      = "get_status"
+	ActionRunCommand     = "run_command"
+	ActionUninstallAgent = "uninstall_agent"
 )

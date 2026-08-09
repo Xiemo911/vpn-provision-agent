@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/Xiemo911/vpn-provision-agent/internal/config"
@@ -27,15 +28,16 @@ type Dispatcher struct {
 func NewDispatcher(cfg *config.Config, mgr *xray.Manager) *Dispatcher {
 	d := &Dispatcher{cfg: cfg, xray: mgr}
 	d.handlers = map[string]Handler{
-		protocol.ActionInstallXray:   d.installXray,
-		protocol.ActionUninstallXray: d.uninstallXray,
-		protocol.ActionRestartXray:   d.restartXray,
-		protocol.ActionAddUser:       d.addUser,
-		protocol.ActionRemoveUser:    d.removeUser,
-		protocol.ActionListUsers:     d.listUsers,
-		protocol.ActionApplyConfig:   d.applyConfig,
-		protocol.ActionGetStatus:     d.getStatus,
-		protocol.ActionRunCommand:    d.runCommand,
+		protocol.ActionInstallXray:    d.installXray,
+		protocol.ActionUninstallXray:  d.uninstallXray,
+		protocol.ActionRestartXray:    d.restartXray,
+		protocol.ActionAddUser:        d.addUser,
+		protocol.ActionRemoveUser:     d.removeUser,
+		protocol.ActionListUsers:      d.listUsers,
+		protocol.ActionApplyConfig:    d.applyConfig,
+		protocol.ActionGetStatus:      d.getStatus,
+		protocol.ActionRunCommand:     d.runCommand,
+		protocol.ActionUninstallAgent: d.uninstallAgent,
 	}
 	return d
 }
@@ -170,8 +172,8 @@ func (d *Dispatcher) listUsers(_ context.Context, params json.RawMessage) (any, 
 }
 
 type applyConfigParams struct {
-	Config json.RawMessage `json:"config"`
-	Restart *bool          `json:"restart"`
+	Config  json.RawMessage `json:"config"`
+	Restart *bool           `json:"restart"`
 }
 
 func (d *Dispatcher) applyConfig(ctx context.Context, params json.RawMessage) (any, error) {
@@ -228,7 +230,37 @@ func (d *Dispatcher) runCommand(ctx context.Context, params json.RawMessage) (an
 	return out, nil
 }
 
+// uninstallAgent removes Xray, the systemd service, the binary, and the
+// config directory, i.e. everything install.sh and installXray put on the
+// host. Because this action must kill the very process running it, the
+// teardown runs as a detached systemd-run transient unit: that lets this
+// handler return success (so the result gets reported to the control server)
+// before the agent's own service is stopped and its files deleted.
+func (d *Dispatcher) uninstallAgent(ctx context.Context, _ json.RawMessage) (any, error) {
+	inner := `sleep 2; ` +
+		`systemctl stop vpn-agent 2>/dev/null || true; ` +
+		`systemctl disable vpn-agent 2>/dev/null || true; ` +
+		`bash -c "$(curl -fsSL https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ remove --purge 2>/dev/null || true; ` +
+		`rm -f /etc/systemd/system/vpn-agent.service; ` +
+		`systemctl daemon-reload 2>/dev/null || true; ` +
+		`rm -rf /etc/vpn-agent; ` +
+		`rm -f /usr/local/bin/vpn-agent`
+
+	script := "systemd-run --unit=vpn-agent-uninstall --collect " +
+		"--description='vpn-agent self-uninstall' bash -c " + shellQuote(inner)
+
+	res, err := system.RunShell(ctx, script)
+	if err != nil {
+		return nil, fmt.Errorf("failed to schedule uninstall: %s", res.Combined())
+	}
+	return map[string]string{"status": "uninstall scheduled"}, nil
+}
+
 // --- helpers ---
+
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
 
 func unmarshal(params json.RawMessage, v any) error {
 	if len(params) == 0 {
