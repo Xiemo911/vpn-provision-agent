@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/Xiemo911/vpn-provision-agent/internal/actions"
+	"github.com/Xiemo911/vpn-provision-agent/internal/amneziawg"
 	"github.com/Xiemo911/vpn-provision-agent/internal/api"
 	"github.com/Xiemo911/vpn-provision-agent/internal/config"
 	"github.com/Xiemo911/vpn-provision-agent/internal/protocol"
@@ -19,6 +20,7 @@ type Agent struct {
 	api        *api.Client
 	dispatcher *actions.Dispatcher
 	xray       *xray.Manager
+	amneziawg  *amneziawg.Manager
 	version    string
 	hostname   string
 	startTime  time.Time
@@ -27,11 +29,13 @@ type Agent struct {
 // New builds an Agent from config.
 func New(cfg *config.Config, version, hostname string) *Agent {
 	mgr := xray.New(cfg.XrayConfigPath)
+	awgMgr := amneziawg.New(cfg.AmneziaWGConfigPath)
 	return &Agent{
 		cfg:        cfg,
 		api:        api.New(cfg.ServerURL, cfg.Token, cfg.AgentID),
-		dispatcher: actions.NewDispatcher(cfg, mgr),
+		dispatcher: actions.NewDispatcher(cfg, mgr, awgMgr),
 		xray:       mgr,
+		amneziawg:  awgMgr,
 		version:    version,
 		hostname:   hostname,
 		startTime:  time.Now(),
@@ -97,6 +101,11 @@ func (a *Agent) status(ctx context.Context) protocol.AgentStatus {
 		XrayInstalled: a.xray.IsInstalled(),
 		XrayRunning:   a.xray.IsRunning(ctx),
 		XrayVersion:   a.xray.Version(ctx),
+
+		AmneziaWGInstalled: a.amneziawg.IsInstalled(),
+		AmneziaWGRunning:   a.amneziawg.IsRunning(ctx),
+		AmneziaWGVersion:   a.amneziawg.Version(ctx),
+
 		UptimeSeconds: int64(time.Since(a.startTime).Seconds()),
 	}
 }

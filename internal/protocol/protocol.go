@@ -13,12 +13,18 @@ type PollRequest struct {
 	Status    AgentStatus `json:"status"`
 }
 
-// AgentStatus is a snapshot of the VPS / Xray state reported with each poll.
+// AgentStatus is a snapshot of the VPS / Xray / AmneziaWG state reported with
+// each poll.
 type AgentStatus struct {
 	XrayInstalled bool   `json:"xray_installed"`
 	XrayRunning   bool   `json:"xray_running"`
 	XrayVersion   string `json:"xray_version,omitempty"`
-	UptimeSeconds int64  `json:"uptime_seconds,omitempty"`
+
+	AmneziaWGInstalled bool   `json:"amneziawg_installed"`
+	AmneziaWGRunning   bool   `json:"amneziawg_running"`
+	AmneziaWGVersion   string `json:"amneziawg_version,omitempty"`
+
+	UptimeSeconds int64 `json:"uptime_seconds,omitempty"`
 }
 
 // PollResponse is returned by the control server with any pending work.
@@ -56,4 +62,11 @@ const (
 	ActionRunCommand     = "run_command"
 	ActionUninstallAgent = "uninstall_agent"
 	ActionUpdateAgent    = "update_agent"
+
+	ActionInstallAmneziaWG     = "install_amneziawg"
+	ActionUninstallAmneziaWG   = "uninstall_amneziawg"
+	ActionRestartAmneziaWG     = "restart_amneziawg"
+	ActionApplyAmneziaWGConfig = "apply_amneziawg_config"
+	ActionAddAmneziaWGPeer     = "add_amneziawg_peer"
+	ActionRemoveAmneziaWGPeer  = "remove_amneziawg_peer"
 )

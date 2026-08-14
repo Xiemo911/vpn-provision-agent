@@ -24,6 +24,8 @@ type Config struct {
 	PollIntervalSeconds int `json:"poll_interval_seconds"`
 	// XrayConfigPath is the path to the Xray config.json on this host.
 	XrayConfigPath string `json:"xray_config_path"`
+	// AmneziaWGConfigPath is the path to the awg0.conf on this host.
+	AmneziaWGConfigPath string `json:"amneziawg_config_path"`
 	// AllowRunCommand enables the run_command action. Off by default.
 	AllowRunCommand bool `json:"allow_run_command"`
 }
@@ -77,6 +79,9 @@ func applyEnvOverrides(cfg *Config) {
 	if v := os.Getenv("AGENT_XRAY_CONFIG_PATH"); v != "" {
 		cfg.XrayConfigPath = v
 	}
+	if v := os.Getenv("AGENT_AMNEZIAWG_CONFIG_PATH"); v != "" {
+		cfg.AmneziaWGConfigPath = v
+	}
 	if v := os.Getenv("AGENT_ALLOW_RUN_COMMAND"); v != "" {
 		if b, err := strconv.ParseBool(v); err == nil {
 			cfg.AllowRunCommand = b
@@ -90,6 +95,9 @@ func applyDefaults(cfg *Config) {
 	}
 	if cfg.XrayConfigPath == "" {
 		cfg.XrayConfigPath = "/usr/local/etc/xray/config.json"
+	}
+	if cfg.AmneziaWGConfigPath == "" {
+		cfg.AmneziaWGConfigPath = "/etc/amnezia/amneziawg/awg0.conf"
 	}
 	if cfg.AgentID == "" {
 		if h, err := os.Hostname(); err == nil {

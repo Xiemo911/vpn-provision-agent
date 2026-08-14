@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Xiemo911/vpn-provision-agent/internal/amneziawg"
 	"github.com/Xiemo911/vpn-provision-agent/internal/config"
 	"github.com/Xiemo911/vpn-provision-agent/internal/protocol"
 	"github.com/Xiemo911/vpn-provision-agent/internal/system"
@@ -19,14 +20,15 @@ type Handler func(ctx context.Context, params json.RawMessage) (any, error)
 
 // Dispatcher routes actions to handlers.
 type Dispatcher struct {
-	cfg      *config.Config
-	xray     *xray.Manager
-	handlers map[string]Handler
+	cfg       *config.Config
+	xray      *xray.Manager
+	amneziawg *amneziawg.Manager
+	handlers  map[string]Handler
 }
 
 // NewDispatcher wires up all supported action handlers.
-func NewDispatcher(cfg *config.Config, mgr *xray.Manager) *Dispatcher {
-	d := &Dispatcher{cfg: cfg, xray: mgr}
+func NewDispatcher(cfg *config.Config, mgr *xray.Manager, awgMgr *amneziawg.Manager) *Dispatcher {
+	d := &Dispatcher{cfg: cfg, xray: mgr, amneziawg: awgMgr}
 	d.handlers = map[string]Handler{
 		protocol.ActionInstallXray:    d.installXray,
 		protocol.ActionUninstallXray:  d.uninstallXray,
@@ -39,6 +41,13 @@ func NewDispatcher(cfg *config.Config, mgr *xray.Manager) *Dispatcher {
 		protocol.ActionRunCommand:     d.runCommand,
 		protocol.ActionUninstallAgent: d.uninstallAgent,
 		protocol.ActionUpdateAgent:    d.updateAgent,
+
+		protocol.ActionInstallAmneziaWG:     d.installAmneziaWG,
+		protocol.ActionUninstallAmneziaWG:   d.uninstallAmneziaWG,
+		protocol.ActionRestartAmneziaWG:     d.restartAmneziaWG,
+		protocol.ActionApplyAmneziaWGConfig: d.applyAmneziaWGConfig,
+		protocol.ActionAddAmneziaWGPeer:     d.addAmneziaWGPeer,
+		protocol.ActionRemoveAmneziaWGPeer:  d.removeAmneziaWGPeer,
 	}
 	return d
 }
@@ -201,6 +210,10 @@ func (d *Dispatcher) getStatus(ctx context.Context, _ json.RawMessage) (any, err
 		XrayInstalled: d.xray.IsInstalled(),
 		XrayRunning:   d.xray.IsRunning(ctx),
 		XrayVersion:   d.xray.Version(ctx),
+
+		AmneziaWGInstalled: d.amneziawg.IsInstalled(),
+		AmneziaWGRunning:   d.amneziawg.IsRunning(ctx),
+		AmneziaWGVersion:   d.amneziawg.Version(ctx),
 	}, nil
 }
 
@@ -255,6 +268,104 @@ func (d *Dispatcher) uninstallAgent(ctx context.Context, _ json.RawMessage) (any
 		return nil, fmt.Errorf("failed to schedule uninstall: %s", res.Combined())
 	}
 	return map[string]string{"status": "uninstall scheduled"}, nil
+}
+
+// --- AmneziaWG handlers ---
+
+func (d *Dispatcher) installAmneziaWG(ctx context.Context, _ json.RawMessage) (any, error) {
+	res, err := d.amneziawg.Install(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("install failed: %s", res.Combined())
+	}
+	return map[string]string{"output": res.Combined()}, nil
+}
+
+func (d *Dispatcher) uninstallAmneziaWG(ctx context.Context, _ json.RawMessage) (any, error) {
+	res, err := d.amneziawg.Uninstall(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("uninstall failed: %s", res.Combined())
+	}
+	return map[string]string{"output": res.Combined()}, nil
+}
+
+func (d *Dispatcher) restartAmneziaWG(ctx context.Context, _ json.RawMessage) (any, error) {
+	if _, err := d.amneziawg.Restart(ctx); err != nil {
+		return nil, err
+	}
+	return map[string]bool{"restarted": true}, nil
+}
+
+type applyAmneziaWGConfigParams struct {
+	Config  string `json:"config"`
+	Restart *bool  `json:"restart"`
+}
+
+func (d *Dispatcher) applyAmneziaWGConfig(ctx context.Context, params json.RawMessage) (any, error) {
+	var p applyAmneziaWGConfigParams
+	if err := unmarshal(params, &p); err != nil {
+		return nil, err
+	}
+	if p.Config == "" {
+		return nil, fmt.Errorf("config is required")
+	}
+	if err := d.amneziawg.ApplyConfig(ctx, p.Config); err != nil {
+		return nil, err
+	}
+	if restartWanted(p.Restart) {
+		if _, err := d.amneziawg.Restart(ctx); err != nil {
+			return nil, fmt.Errorf("config applied but restart failed: %w", err)
+		}
+	}
+	return map[string]bool{"applied": true}, nil
+}
+
+type addAmneziaWGPeerParams struct {
+	PeerConfigText string `json:"peer_config_text"`
+	PublicKey      string `json:"public_key"`
+	Email          string `json:"email"`
+	AllowedIP      string `json:"allowed_ip"`
+	// PrivateKey is opaque to the agent (a [Peer] block never contains a
+	// private key) — it's only round-tripped in the result so the backend
+	// can persist the peer into its stored config once the add is confirmed,
+	// mirroring how add_vless_user's echoed client is used.
+	PrivateKey string `json:"private_key"`
+}
+
+func (d *Dispatcher) addAmneziaWGPeer(ctx context.Context, params json.RawMessage) (any, error) {
+	var p addAmneziaWGPeerParams
+	if err := unmarshal(params, &p); err != nil {
+		return nil, err
+	}
+	if p.PeerConfigText == "" {
+		return nil, fmt.Errorf("peer_config_text is required")
+	}
+	if err := d.amneziawg.AddPeer(ctx, p.PeerConfigText); err != nil {
+		return nil, err
+	}
+	return map[string]string{
+		"public_key":  p.PublicKey,
+		"email":       p.Email,
+		"allowed_ip":  p.AllowedIP,
+		"private_key": p.PrivateKey,
+	}, nil
+}
+
+type removeAmneziaWGPeerParams struct {
+	PublicKey string `json:"public_key"`
+}
+
+func (d *Dispatcher) removeAmneziaWGPeer(ctx context.Context, params json.RawMessage) (any, error) {
+	var p removeAmneziaWGPeerParams
+	if err := unmarshal(params, &p); err != nil {
+		return nil, err
+	}
+	if p.PublicKey == "" {
+		return nil, fmt.Errorf("public_key is required")
+	}
+	if err := d.amneziawg.RemovePeer(ctx, p.PublicKey); err != nil {
+		return nil, err
+	}
+	return map[string]string{"public_key": p.PublicKey}, nil
 }
 
 // --- helpers ---
