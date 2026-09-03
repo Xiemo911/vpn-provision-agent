@@ -189,8 +189,21 @@ GOBIN=/usr/local/bin go install github.com/amnezia-vpn/amneziawg-go@latest
 if ! command -v awg >/dev/null 2>&1 || ! command -v awg-quick >/dev/null 2>&1; then
   (apt-get update -y && apt-get install -y build-essential libmnl-dev pkg-config git) >/dev/null 2>&1 || \
     (yum install -y gcc make libmnl-devel pkgconfig git) >/dev/null 2>&1 || true
-  rm -rf /tmp/amneziawg-tools
-  git clone --depth 1 https://github.com/amnezia-vpn/amneziawg-tools.git /tmp/amneziawg-tools
+  # -c protocol.version=1: GitHub's anonymous git-upload-pack over protocol
+  # v2 (git >=2.29 default) intermittently 401s on the stateless-RPC POST
+  # even though the repo is public, which surfaces as a confusing "could not
+  # read Username" prompt error. Protocol v1 clones the same repo fine.
+  # Retried a few times on top of that in case of a plain transient network
+  # blip (unrelated to the protocol-v2 issue above).
+  for attempt in 1 2 3; do
+    rm -rf /tmp/amneziawg-tools
+    git -c protocol.version=1 clone --depth 1 https://github.com/amnezia-vpn/amneziawg-tools.git /tmp/amneziawg-tools && break
+    if [ "$attempt" = 3 ]; then
+      echo "amneziawg-tools clone failed after 3 attempts" >&2
+      exit 1
+    fi
+    sleep 5
+  done
   make -C /tmp/amneziawg-tools/src
   install -m 0755 /tmp/amneziawg-tools/src/wg /usr/local/bin/awg
   install -m 0755 /tmp/amneziawg-tools/src/wg-quick/linux.bash /usr/local/bin/awg-quick
