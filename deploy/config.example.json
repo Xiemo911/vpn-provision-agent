@@ -4,5 +4,6 @@
   "token": "REPLACE_WITH_PER_AGENT_TOKEN",
   "poll_interval_seconds": 60,
   "xray_config_path": "/usr/local/etc/xray/config.json",
+  "amneziawg_config_path": "/etc/amnezia/amneziawg/awg0.conf",
   "allow_run_command": false
 }
