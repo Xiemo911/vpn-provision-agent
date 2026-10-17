@@ -1,11 +1,14 @@
 package xray
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
+
+	"github.com/Xiemo911/vpn-provision-agent/internal/system"
 )
 
 // Client is a single VLESS user entry inside an inbound's settings.clients.
@@ -115,8 +118,10 @@ func clientsOf(in map[string]json.RawMessage) ([]Client, map[string]json.RawMess
 }
 
 // modifyClients loads the config, applies fn to the target inbound's client
-// list, and writes the result back. All unmodeled fields are preserved.
-func modifyClients(path, tag string, fn func([]Client) ([]Client, error)) error {
+// list, and writes the result back. All unmodeled fields are preserved. The
+// written config is validated with `xray -test`; on failure the previous
+// config is restored so a bad edit can't leave xray unable to restart.
+func modifyClients(ctx context.Context, path, tag string, fn func([]Client) ([]Client, error)) error {
 	cfg, err := readConfig(path)
 	if err != nil {
 		return err
@@ -157,7 +162,29 @@ func modifyClients(path, tag string, fn func([]Client) ([]Client, error)) error 
 	}
 	cfg["inbounds"] = inboundsRaw
 
-	return writeConfig(path, cfg)
+	backup, hadOld := "", false
+	if old, rerr := os.ReadFile(path); rerr == nil {
+		backup = path + ".bak"
+		hadOld = true
+		if werr := writeFileAtomic(backup, old); werr != nil {
+			return fmt.Errorf("backup existing config: %w", werr)
+		}
+	}
+
+	if err := writeConfig(path, cfg); err != nil {
+		return err
+	}
+
+	res, err := system.Run(ctx, "xray", "-test", "-config", path)
+	if err != nil {
+		if hadOld {
+			if old, rerr := os.ReadFile(backup); rerr == nil {
+				_ = writeFileAtomic(path, old)
+			}
+		}
+		return fmt.Errorf("config failed validation: %s", res.Combined())
+	}
+	return nil
 }
 
 // listClients returns the current clients of the target inbound.

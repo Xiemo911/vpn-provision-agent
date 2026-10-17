@@ -3,6 +3,7 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"log"
 	"time"
 
@@ -74,7 +75,11 @@ func (a *Agent) tick(ctx context.Context) {
 
 	resp, err := a.api.Poll(ctx, req)
 	if err != nil {
-		log.Printf("poll error: %v", err)
+		if errors.Is(err, api.ErrUnauthorized) {
+			log.Printf("poll error: %v (check token/agent_id in the agent config)", err)
+		} else {
+			log.Printf("poll error: %v", err)
+		}
 		return
 	}
 	if len(resp.Actions) == 0 {

@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os/exec"
 	"strings"
+	"time"
 
 	"github.com/Xiemo911/vpn-provision-agent/internal/system"
 )
@@ -75,7 +76,9 @@ func (m *Manager) Uninstall(ctx context.Context) (system.Result, error) {
 	return system.RunShell(ctx, uninstallScript)
 }
 
-// Restart enables and restarts the awg-quick@awg0 service.
+// Restart enables and restarts the awg-quick@awg0 service, and confirms it
+// actually reaches the active state rather than trusting systemctl's exit
+// code alone.
 func (m *Manager) Restart(ctx context.Context) (system.Result, error) {
 	if res, err := system.Run(ctx, "systemctl", "enable", systemdUnit); err != nil {
 		return res, fmt.Errorf("enable %s: %s", systemdUnit, res.Combined())
@@ -84,7 +87,29 @@ func (m *Manager) Restart(ctx context.Context) (system.Result, error) {
 	if err != nil {
 		return res, fmt.Errorf("restart %s: %s", systemdUnit, res.Combined())
 	}
+	if !m.waitRunning(ctx) {
+		return res, fmt.Errorf("restart %s: service did not reach active state", systemdUnit)
+	}
 	return res, nil
+}
+
+// waitRunning polls IsRunning for a few seconds to give the service time to
+// come up (or crash) after a restart before reporting success.
+func (m *Manager) waitRunning(ctx context.Context) bool {
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if m.IsRunning(ctx) {
+			return true
+		}
+		if time.Now().After(deadline) {
+			return false
+		}
+		select {
+		case <-ctx.Done():
+			return false
+		case <-time.After(300 * time.Millisecond):
+		}
+	}
 }
 
 // ApplyConfig validates and installs a full replacement awg0.conf. The
@@ -175,7 +200,14 @@ if ! command -v go >/dev/null 2>&1; then
     *) echo "unsupported architecture: $ARCH" >&2; exit 1 ;;
   esac
   GOVER=1.23.4
-  curl -fsSL "https://go.dev/dl/go${GOVER}.linux-${GOARCH}.tar.gz" -o /tmp/go.tar.gz
+  for attempt in 1 2 3; do
+    curl -fsSL "https://go.dev/dl/go${GOVER}.linux-${GOARCH}.tar.gz" -o /tmp/go.tar.gz && break
+    if [ "$attempt" = 3 ]; then
+      echo "go toolchain download failed after 3 attempts" >&2
+      exit 1
+    fi
+    sleep 5
+  done
   rm -rf /usr/local/go
   tar -C /usr/local -xzf /tmp/go.tar.gz
   rm -f /tmp/go.tar.gz
@@ -187,8 +219,26 @@ export PATH=$PATH:/usr/local/go/bin
 GOBIN=/usr/local/bin go install github.com/amnezia-vpn/amneziawg-go@latest
 
 if ! command -v awg >/dev/null 2>&1 || ! command -v awg-quick >/dev/null 2>&1; then
-  (apt-get update -y && apt-get install -y build-essential libmnl-dev pkg-config git) >/dev/null 2>&1 || \
-    (yum install -y gcc make libmnl-devel pkgconfig git) >/dev/null 2>&1 || true
+  if command -v apt-get >/dev/null 2>&1; then
+    # A fresh VPS's first-boot cloud-init/unattended-upgrades run often holds
+    # the dpkg lock for a minute or two; retry instead of failing on it (and
+    # instead of silently swallowing the error, which previously let a real
+    # apt failure surface only later as a confusing "make" compiler error).
+    attempt=0
+    until apt-get update -y && apt-get install -y build-essential libmnl-dev pkg-config git; do
+      attempt=$((attempt + 1))
+      if [ "$attempt" -ge 10 ]; then
+        echo "apt-get install failed after 10 attempts (possibly a persistent dpkg lock)" >&2
+        break
+      fi
+      sleep 3
+    done
+  elif command -v yum >/dev/null 2>&1; then
+    yum install -y gcc make libmnl-devel pkgconfig git || \
+      echo "yum install failed; continuing, build may fail below" >&2
+  else
+    echo "no apt-get or yum found; cannot install build dependencies" >&2
+  fi
   # -c protocol.version=1: GitHub's anonymous git-upload-pack over protocol
   # v2 (git >=2.29 default) intermittently 401s on the stateless-RPC POST
   # even though the repo is public, which surfaces as a confusing "could not

@@ -93,6 +93,9 @@ func (d *Dispatcher) installXray(ctx context.Context, params json.RawMessage) (a
 	if err != nil {
 		return nil, fmt.Errorf("install failed: %s", res.Combined())
 	}
+	if !d.xray.IsInstalled() {
+		return nil, fmt.Errorf("install script exited successfully but the xray binary is not present: %s", res.Combined())
+	}
 	return map[string]string{"output": res.Combined()}, nil
 }
 
@@ -124,7 +127,7 @@ func (d *Dispatcher) addUser(ctx context.Context, params json.RawMessage) (any, 
 	if err := unmarshal(params, &p); err != nil {
 		return nil, err
 	}
-	client, err := d.xray.AddUser(p.InboundTag, xray.Client{ID: p.ID, Email: p.Email, Flow: p.Flow})
+	client, err := d.xray.AddUser(ctx, p.InboundTag, xray.Client{ID: p.ID, Email: p.Email, Flow: p.Flow})
 	if err != nil {
 		return nil, err
 	}
@@ -155,7 +158,7 @@ func (d *Dispatcher) removeUser(ctx context.Context, params json.RawMessage) (an
 	if target == "" {
 		return nil, fmt.Errorf("either id or email is required")
 	}
-	removed, err := d.xray.RemoveUser(p.InboundTag, target)
+	removed, err := d.xray.RemoveUser(ctx, p.InboundTag, target)
 	if err != nil {
 		return nil, err
 	}
@@ -276,6 +279,9 @@ func (d *Dispatcher) installAmneziaWG(ctx context.Context, _ json.RawMessage) (a
 	res, err := d.amneziawg.Install(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("install failed: %s", res.Combined())
+	}
+	if !d.amneziawg.IsInstalled() {
+		return nil, fmt.Errorf("install script exited successfully but awg/awg-quick are not present: %s", res.Combined())
 	}
 	return map[string]string{"output": res.Combined()}, nil
 }

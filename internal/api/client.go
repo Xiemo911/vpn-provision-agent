@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -13,6 +14,11 @@ import (
 
 	"github.com/Xiemo911/vpn-provision-agent/internal/protocol"
 )
+
+// ErrUnauthorized wraps any response the control server rejects with 401/403,
+// so callers can tell "bad token/agent_id" apart from a transient network or
+// server error instead of logging both identically forever.
+var ErrUnauthorized = errors.New("control server rejected credentials")
 
 // Client talks to the control server.
 type Client struct {
@@ -65,6 +71,9 @@ func (c *Client) do(ctx context.Context, path string, body, out any) error {
 	defer httpResp.Body.Close()
 
 	respBody, _ := io.ReadAll(io.LimitReader(httpResp.Body, 1<<20))
+	if httpResp.StatusCode == http.StatusUnauthorized || httpResp.StatusCode == http.StatusForbidden {
+		return fmt.Errorf("%s: %w (%d): %s", path, ErrUnauthorized, httpResp.StatusCode, strings.TrimSpace(string(respBody)))
+	}
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
 		return fmt.Errorf("%s: server returned %d: %s", path, httpResp.StatusCode, strings.TrimSpace(string(respBody)))
 	}

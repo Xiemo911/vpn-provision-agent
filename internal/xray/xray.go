@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"time"
 
 	"github.com/Xiemo911/vpn-provision-agent/internal/system"
 )
@@ -58,7 +59,10 @@ func (m *Manager) Version(ctx context.Context) string {
 // Install runs the official Xray-install script. An empty version installs the
 // latest release.
 func (m *Manager) Install(ctx context.Context, version string) (system.Result, error) {
-	script := `bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install`
+	// -f makes curl exit non-zero on a 4xx/5xx response instead of piping an
+	// HTML error page into `bash -c`, which would otherwise silently "succeed"
+	// while installing nothing.
+	script := `bash -c "$(curl -fsSL https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install`
 	if version != "" {
 		script += " --version " + shellQuote(version)
 	}
@@ -67,11 +71,13 @@ func (m *Manager) Install(ctx context.Context, version string) (system.Result, e
 
 // Uninstall removes Xray via the official installer.
 func (m *Manager) Uninstall(ctx context.Context) (system.Result, error) {
-	script := `bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ remove --purge`
+	script := `bash -c "$(curl -fsSL https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ remove --purge`
 	return system.RunShell(ctx, script)
 }
 
-// Restart restarts (and enables) the xray service.
+// Restart restarts (and enables) the xray service, and confirms it actually
+// reaches the active state rather than trusting systemctl's exit code alone
+// (a Type=simple unit can report a successful restart and then crash-loop).
 func (m *Manager) Restart(ctx context.Context) (system.Result, error) {
 	if res, err := system.Run(ctx, "systemctl", "enable", "xray"); err != nil {
 		return res, fmt.Errorf("enable xray: %s", res.Combined())
@@ -80,12 +86,36 @@ func (m *Manager) Restart(ctx context.Context) (system.Result, error) {
 	if err != nil {
 		return res, fmt.Errorf("restart xray: %s", res.Combined())
 	}
+	if !m.waitRunning(ctx) {
+		return res, fmt.Errorf("restart xray: service did not reach active state")
+	}
 	return res, nil
 }
 
+// waitRunning polls IsRunning for a few seconds to give the service time to
+// come up (or crash) after a restart before reporting success.
+func (m *Manager) waitRunning(ctx context.Context) bool {
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if m.IsRunning(ctx) {
+			return true
+		}
+		if time.Now().After(deadline) {
+			return false
+		}
+		select {
+		case <-ctx.Done():
+			return false
+		case <-time.After(300 * time.Millisecond):
+		}
+	}
+}
+
 // AddUser adds a VLESS client to the target inbound (empty tag = first VLESS
-// inbound). If client.ID is empty a new UUID is generated and returned.
-func (m *Manager) AddUser(inboundTag string, client Client) (Client, error) {
+// inbound). If client.ID is empty a new UUID is generated and returned. The
+// resulting config is validated with `xray -test` before being kept; a bad
+// result is rolled back so a malformed add can't break a running xray.
+func (m *Manager) AddUser(ctx context.Context, inboundTag string, client Client) (Client, error) {
 	if client.ID == "" {
 		id, err := NewUUID()
 		if err != nil {
@@ -93,7 +123,7 @@ func (m *Manager) AddUser(inboundTag string, client Client) (Client, error) {
 		}
 		client.ID = id
 	}
-	err := modifyClients(m.ConfigPath, inboundTag, func(clients []Client) ([]Client, error) {
+	err := modifyClients(ctx, m.ConfigPath, inboundTag, func(clients []Client) ([]Client, error) {
 		for _, c := range clients {
 			if c.ID == client.ID {
 				return nil, fmt.Errorf("client id %s already exists", client.ID)
@@ -108,10 +138,11 @@ func (m *Manager) AddUser(inboundTag string, client Client) (Client, error) {
 }
 
 // RemoveUser deletes clients matching idOrEmail from the target inbound.
-// It returns the number of clients removed.
-func (m *Manager) RemoveUser(inboundTag, idOrEmail string) (int, error) {
+// It returns the number of clients removed. See AddUser for the validation
+// and rollback behavior applied to the written config.
+func (m *Manager) RemoveUser(ctx context.Context, inboundTag, idOrEmail string) (int, error) {
 	removed := 0
-	err := modifyClients(m.ConfigPath, inboundTag, func(clients []Client) ([]Client, error) {
+	err := modifyClients(ctx, m.ConfigPath, inboundTag, func(clients []Client) ([]Client, error) {
 		kept := clients[:0:0]
 		for _, c := range clients {
 			if c.ID == idOrEmail || (c.Email != "" && c.Email == idOrEmail) {
