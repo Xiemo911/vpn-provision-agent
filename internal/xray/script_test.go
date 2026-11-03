@@ -34,3 +34,15 @@ func TestInstallScriptPinsVersions(t *testing.T) {
 		t.Error("an explicit version isn't passed to the installer")
 	}
 }
+
+func TestInstallScriptChecksAndMarks(t *testing.T) {
+	script := installScript("")
+	for _, want := range []string{"need_disk 300", `need_hosts "Xray" raw.githubusercontent.com github.com`, "touch " + markerDir + "/.nullsify"} {
+		if !strings.Contains(script, want) {
+			t.Errorf("install script lacks %q", want)
+		}
+	}
+	if strings.Index(script, `need_hosts "Xray"`) < strings.Index(script, "pkg_install $missing") {
+		t.Error("reachability is checked before curl is installed")
+	}
+}

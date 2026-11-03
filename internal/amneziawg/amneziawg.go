@@ -9,6 +9,7 @@ import (
 	"context"
 	"fmt"
 	"os/exec"
+	"strconv"
 	"strings"
 	"time"
 
@@ -197,6 +198,21 @@ func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
+// goRoot is where Install keeps its own Go toolchain: a directory of ours,
+// so a Go the VPS owner put in /usr/local/go is never replaced or removed.
+const (
+	nullsifyDir = "/opt/nullsify"
+	goRoot      = nullsifyDir + "/go"
+)
+
+// Disk space Install needs (MB): Go (~350 with its download), build tools
+// (~250), build caches (~100), plus headroom; and the temporary swap file
+// on a small VPS.
+const (
+	installDiskMB = 1200
+	swapMB        = 1024
+)
+
 func installScript() string {
 	return system.PkgHelpers + `
 set -e
@@ -205,16 +221,20 @@ export HOME="${HOME:-/root}"
 # amneziawg-go is a userspace daemon and needs a TUN device, which OpenVZ and
 # many LXC containers only provide once it's enabled in the provider's panel.
 modprobe tun >/dev/null 2>&1 || true
-if [ ! -c /dev/net/tun ]; then
-  echo "This VPS has no TUN device (/dev/net/tun), which AmneziaWG needs. It is usually an OpenVZ or LXC container: enable TUN/TAP in your provider's control panel, or use a KVM VPS." >&2
-  exit 1
-fi
+[ -c /dev/net/tun ] || fail "This VPS has no TUN device (/dev/net/tun), which AmneziaWG and WireGuard need. It's usually an OpenVZ or LXC container: enable TUN/TAP in your provider's control panel, or use a KVM VPS."
+
+# The VPN turns on IP forwarding when it starts; containers often forbid
+# that. Writing back the current value tests it without changing anything.
+sysctl -w net.ipv4.ip_forward="$(sysctl -n net.ipv4.ip_forward 2>/dev/null || echo 0)" >/dev/null 2>&1 ||
+  fail "This VPS doesn't allow changing its network settings (net.ipv4.ip_forward), which the VPN needs to route traffic. That's common on LXC/OpenVZ containers: use a KVM VPS, or ask your provider to allow it."
 
 case "$(uname -m)" in
   x86_64) GOARCH=amd64 ;;
   aarch64|arm64) GOARCH=arm64 ;;
-  *) echo "unsupported architecture: $(uname -m)" >&2; exit 1 ;;
+  *) fail "This VPS's CPU architecture ($(uname -m)) isn't supported. Use a 64-bit (x86-64 or ARM64) VPS." ;;
 esac
+
+need_disk ` + strconv.Itoa(installDiskMB) + `
 
 # Build tools, plus what awg-quick needs at runtime: ip (iproute2) to bring
 # the interface up and iptables for the NAT rules in the server config.
@@ -225,37 +245,62 @@ else
   pkg_install gcc make libmnl-devel pkgconfig git ca-certificates curl iptables iproute
 fi
 for tool in make git iptables ip; do
-  if ! command -v "$tool" >/dev/null 2>&1; then
-    echo "$tool is still missing after installing packages" >&2
-    exit 1
-  fi
+  command -v "$tool" >/dev/null 2>&1 || fail "$tool is still missing on the VPS after installing packages."
 done
+iptables -t nat -L -n >/dev/null 2>&1 ||
+  fail "This VPS doesn't allow NAT in its firewall (iptables' nat table), which the VPN needs to give clients internet access. That's common on LXC/OpenVZ containers: use a KVM VPS."
 
-# Always the pinned Go in /usr/local/go, never a distro go found on PATH:
-# Debian 12 and Ubuntu 22.04 ship versions too old to build amneziawg-go.
-GO=/usr/local/go/bin/go
+need_hosts "AmneziaWG" go.dev dl.google.com proxy.golang.org github.com
+
+# Build in a throwaway directory (Go's module and build caches, about 100
+# MB), deleted on exit whether or not the build works. /var/tmp rather than
+# /tmp, which is often a small RAM-backed tmpfs.
+build_dir=$(mktemp -d /var/tmp/awg-build.XXXXXX)
+swap_file=""
+cleanup() {
+  if [ -n "$swap_file" ]; then swapoff "$swap_file" 2>/dev/null || true; rm -f "$swap_file"; fi
+  rm -rf "$build_dir"
+}
+trap cleanup EXIT
+
+# Always our own pinned Go, never a distro go found on PATH: Debian 12 and
+# Ubuntu 22.04 ship versions too old to build amneziawg-go.
+GO=` + goRoot + `/bin/go
 if [ "$("$GO" env GOVERSION 2>/dev/null)" != "` + goVersion + `" ]; then
   for attempt in 1 2 3; do
-    curl -fsSL --connect-timeout 20 --max-time 600 -o /tmp/go.tar.gz "https://go.dev/dl/` + goVersion + `.linux-${GOARCH}.tar.gz" && break
-    if [ "$attempt" = 3 ]; then
-      echo "Go toolchain download failed after 3 attempts" >&2
-      exit 1
-    fi
+    curl -fsSL --connect-timeout 20 --max-time 600 -o "$build_dir/go.tar.gz" "https://go.dev/dl/` + goVersion + `.linux-${GOARCH}.tar.gz" && break
+    [ "$attempt" = 3 ] && fail "Couldn't download the Go toolchain from go.dev to build AmneziaWG. Try again in a few minutes."
     sleep 5
   done
-  rm -rf /usr/local/go
-  tar -C /usr/local -xzf /tmp/go.tar.gz
-  rm -f /tmp/go.tar.gz
+  rm -rf ` + goRoot + `
+  mkdir -p ` + nullsifyDir + `
+  tar -C ` + nullsifyDir + ` -xzf "$build_dir/go.tar.gz"
+  rm -f "$build_dir/go.tar.gz"
 fi
 
-# Build with throwaway module and build caches (about 100 MB), deleted on
-# exit whether or not the build works, instead of leaving them in /root.
-# -modcacherw keeps the module cache deletable. /var/tmp rather than /tmp,
-# which is often a small RAM-backed tmpfs.
-build_dir=$(mktemp -d /var/tmp/awg-build.XXXXXX)
-trap 'rm -rf "$build_dir"' EXIT
-GOPATH="$build_dir/gopath" GOCACHE="$build_dir/cache" GOFLAGS=-modcacherw \
-  GOTOOLCHAIN=local GOBIN=/usr/local/bin "$GO" install github.com/amnezia-vpn/amneziawg-go@` + amneziaWGGoVersion + `
+# Compiling amneziawg-go peaks around 1 GB of memory. On a smaller VPS,
+# build one package at a time and add a temporary swap file (removed again
+# by cleanup), or the kernel kills the build.
+build_flags=""
+avail_mb=$(awk '/^MemAvailable:/ {a=$2} /^SwapFree:/ {s=$2} END {print int((a+s)/1024)}' /proc/meminfo)
+if [ "$avail_mb" -lt 1536 ]; then
+  build_flags="-p 1"
+  free_mb=$(df -Pm /var/tmp | awk 'NR==2 {print $4}')
+  if [ "$free_mb" -gt $((` + strconv.Itoa(swapMB) + ` + 500)) ]; then
+    swap_file=/var/tmp/nullsify-build.swap
+    if { fallocate -l ` + strconv.Itoa(swapMB) + `M "$swap_file" 2>/dev/null ||
+         dd if=/dev/zero of="$swap_file" bs=1M count=` + strconv.Itoa(swapMB) + ` status=none 2>/dev/null; } &&
+       chmod 600 "$swap_file" && mkswap "$swap_file" >/dev/null 2>&1 && swapon "$swap_file" 2>/dev/null; then
+      :
+    else
+      rm -f "$swap_file"; swap_file=""
+    fi
+  fi
+fi
+
+GOPATH="$build_dir/gopath" GOCACHE="$build_dir/cache" GOFLAGS=-modcacherw GOTOOLCHAIN=local GOBIN=/usr/local/bin \
+  "$GO" install $build_flags github.com/amnezia-vpn/amneziawg-go@` + amneziaWGGoVersion + ` ||
+  fail "Building AmneziaWG on the VPS failed. On a VPS with 1 GB of memory or less that's usually the build running out of memory: try a VPS with more RAM. Otherwise, try again."
 
 if ! command -v awg >/dev/null 2>&1 || ! command -v awg-quick >/dev/null 2>&1; then
   # -c protocol.version=1: GitHub's anonymous git-upload-pack over protocol
@@ -267,10 +312,7 @@ if ! command -v awg >/dev/null 2>&1 || ! command -v awg-quick >/dev/null 2>&1; t
   for attempt in 1 2 3; do
     rm -rf /tmp/amneziawg-tools
     git -c protocol.version=1 clone --depth 1 --branch ` + amneziaWGToolsVersion + ` https://github.com/amnezia-vpn/amneziawg-tools.git /tmp/amneziawg-tools && break
-    if [ "$attempt" = 3 ]; then
-      echo "amneziawg-tools clone failed after 3 attempts" >&2
-      exit 1
-    fi
+    [ "$attempt" = 3 ] && fail "Couldn't download amneziawg-tools from github.com. Try again in a few minutes."
     sleep 5
   done
   make -C /tmp/amneziawg-tools/src
@@ -300,23 +342,27 @@ Environment=WG_QUICK_USERSPACE_IMPLEMENTATION=/usr/local/bin/amneziawg-go
 WantedBy=multi-user.target
 UNIT
 
+# Marks this AmneziaWG as Nullsify's, so a later install on this VPS can tell
+# it from someone else's (which it must not overwrite). Uninstall removes it
+# with the rest of /etc/amnezia.
+mkdir -p ` + markerDir + ` && touch ` + markerDir + `/.nullsify
+
 systemctl daemon-reload
 `
 }
 
-// uninstallScript also removes the Go toolchain Install put in /usr/local/go
-// (about 270 MB), but only when it's exactly the pinned version, so a Go the
-// VPS owner installed there themselves is left alone. The go/gofmt links
-// older agents created go with it, if they point into it.
+// markerDir holds the marker file that says Nullsify installed this
+// AmneziaWG; the control server's pre-install check looks for it.
+const markerDir = "/etc/amnezia/amneziawg"
+
+// uninstallScript also removes the Go toolchain Install keeps in goRoot
+// (about 270 MB). /usr/local/go is never touched: it may be the VPS
+// owner's own Go.
 const uninstallScript = `systemctl disable --now ` + systemdUnit + ` 2>/dev/null || true
 rm -f /etc/systemd/system/awg-quick@.service
 systemctl daemon-reload 2>/dev/null || true
 rm -f /usr/local/bin/awg /usr/local/bin/awg-quick /usr/local/bin/amneziawg-go
 rm -rf /etc/amnezia
-if [ "$(/usr/local/go/bin/go env GOVERSION 2>/dev/null)" = "` + goVersion + `" ]; then
-  for link in /usr/local/bin/go /usr/local/bin/gofmt; do
-    case "$(readlink "$link" 2>/dev/null)" in /usr/local/go/*) rm -f "$link" ;; esac
-  done
-  rm -rf /usr/local/go
-fi
+rm -rf ` + goRoot + `
+rmdir ` + nullsifyDir + ` 2>/dev/null || true
 `

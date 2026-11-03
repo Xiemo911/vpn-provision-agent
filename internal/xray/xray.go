@@ -96,6 +96,7 @@ func installScript(version string) string {
 		version = DefaultVersion
 	}
 	return system.PkgHelpers + `
+need_disk 300
 missing=""
 for tool in curl unzip gzip; do
   command -v "$tool" >/dev/null 2>&1 || missing="$missing $tool"
@@ -103,8 +104,18 @@ done
 if [ -n "$missing" ]; then
   pkg_install $missing || exit 1
 fi
-` + installerScript("install --version "+shellQuote(version))
+need_hosts "Xray" raw.githubusercontent.com github.com
+` + installerScript("install --version "+shellQuote(version)) + `
+# Marks this Xray as Nullsify's, so a later install on this VPS can tell it
+# from someone else's (which it must not overwrite). The installer's
+# "remove --purge" deletes it along with the rest of the directory.
+mkdir -p ` + markerDir + ` && touch ` + markerDir + `/.nullsify
+`
 }
+
+// markerDir holds the marker file that says Nullsify installed this Xray;
+// the control server's pre-install check looks for it.
+const markerDir = "/usr/local/etc/xray"
 
 // Uninstall removes Xray via the official installer.
 func (m *Manager) Uninstall(ctx context.Context) (system.Result, error) {

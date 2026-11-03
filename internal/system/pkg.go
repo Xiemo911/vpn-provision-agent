@@ -1,18 +1,40 @@
 package system
 
-// PkgHelpers is a shell snippet for install scripts. It defines pkg_install,
-// which installs packages with apt-get, dnf or yum (the caller passes names
-// for the package manager in use, telling them apart with has_apt).
+// UserErrorMarker starts a line of script output written for the user. The
+// control server shows the last such line on the task page instead of a
+// generic error, so scripts use it (through fail) for problems the VPS
+// owner has to fix. Keep in sync with the control server's usererr.Marker.
+const UserErrorMarker = "NULLSIFY_ERROR: "
+
+// PkgHelpers is a shell snippet for install scripts. It defines:
+//
+//   - fail MESSAGE: print MESSAGE for the user (see UserErrorMarker), exit 1.
+//   - pkg_install PKG...: install packages with apt-get, dnf or yum (the
+//     caller passes names for the package manager in use, telling them
+//     apart with has_apt).
+//   - need_disk MB: fail unless / has MB megabytes free.
+//   - need_hosts WHAT HOST...: fail unless HTTPS to every HOST works; WHAT
+//     says what they're needed for.
 //
 // A fresh VPS's first-boot cloud-init and unattended-upgrades runs hold the
-// dpkg lock for several minutes, so apt-get waits for it (DPkg::Lock::Timeout)
+// dpkg lock for many minutes, so apt-get waits for it (DPkg::Lock::Timeout)
 // and the whole install is retried for a few minutes more before giving up
 // with a clear error, rather than failing at once or carrying on without
-// the packages.
+// the packages. A dpkg run cut short (a crash or reboot mid-upgrade) is
+// finished first: until it is, every install fails with "dpkg was
+// interrupted".
 const PkgHelpers = `
 export DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a
 
+fail() { echo "` + UserErrorMarker + `$*" >&2; exit 1; }
+
 has_apt() { command -v apt-get >/dev/null 2>&1; }
+
+repair_dpkg() {
+  if [ -n "$(ls -A /var/lib/dpkg/updates 2>/dev/null)" ] || [ -n "$(dpkg --audit 2>/dev/null)" ]; then
+    dpkg --force-confdef --force-confold --configure -a || true
+  fi
+}
 
 pkg_install() {
   if has_apt; then
@@ -20,24 +42,40 @@ pkg_install() {
       timeout 600 cloud-init status --wait >/dev/null 2>&1 || true
     fi
     for attempt in 1 2 3 4 5 6; do
+      repair_dpkg
       apt-get -q -o DPkg::Lock::Timeout=300 update >/dev/null 2>&1 || true
       if apt-get -q -y -o DPkg::Lock::Timeout=300 install --no-install-recommends "$@"; then
         return 0
       fi
       sleep 20
     done
-    echo "apt-get could not install $* (the dpkg lock stayed busy or the package mirror is unreachable)" >&2
-    return 1
+    fail "Couldn't install $* on the VPS: its package manager stayed busy (often automatic updates on a new VPS) or its package mirror is unreachable. Try again in a few minutes."
   elif command -v dnf >/dev/null 2>&1; then
     dnf install -y "$@" && return 0
-    echo "dnf could not install $*" >&2
-    return 1
+    fail "Couldn't install $* with dnf on the VPS."
   elif command -v yum >/dev/null 2>&1; then
     yum install -y "$@" && return 0
-    echo "yum could not install $*" >&2
-    return 1
+    fail "Couldn't install $* with yum on the VPS."
   fi
-  echo "no supported package manager (apt-get, dnf or yum) to install $*" >&2
-  return 1
+  fail "The VPS has no supported package manager (apt-get, dnf or yum) to install $*."
+}
+
+need_disk() {
+  free_mb=$(df -Pm / | awk 'NR==2 {print $4}')
+  if [ -n "$free_mb" ] && [ "$free_mb" -lt "$1" ]; then
+    fail "The VPS has only ${free_mb} MB of free disk space; installing needs about $1 MB. Free some space, then try again."
+  fi
+}
+
+need_hosts() {
+  what=$1; shift
+  for host in "$@"; do
+    if ! curl -sS -o /dev/null --connect-timeout 10 --max-time 20 "https://$host/" 2>/dev/null; then
+      if command -v ip >/dev/null 2>&1 && [ -z "$(ip -4 route show default 2>/dev/null)" ]; then
+        fail "The VPS has no IPv4 internet access, and $host (needed to download $what) only works over IPv4. Use a VPS with an IPv4 address."
+      fi
+      fail "The VPS can't reach $host, which is needed to download $what. Check its DNS and that outbound HTTPS isn't blocked (GitHub, for one, is blocked in some countries)."
+    fi
+  done
 }
 `
