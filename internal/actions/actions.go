@@ -281,24 +281,30 @@ func (d *Dispatcher) runCommand(ctx context.Context, params json.RawMessage) (an
 	return out, nil
 }
 
-// uninstallAgent removes Xray, the systemd service, the binary, and the
-// config directory, i.e. everything install.sh and installXray put on the
-// host. Because this action must kill the very process running it, the
-// teardown runs as a detached systemd-run transient unit: that lets this
-// handler return success (so the result gets reported to the control server)
-// before the agent's own service is stopped and its files deleted.
-func (d *Dispatcher) uninstallAgent(ctx context.Context, _ json.RawMessage) (any, error) {
-	inner := `sleep 2; ` +
-		`systemctl stop vpn-agent 2>/dev/null || true; ` +
-		`systemctl disable vpn-agent 2>/dev/null || true; ` +
-		`bash -c "$(curl -fsSL ` + xray.InstallScriptURL + `)" @ remove --purge 2>/dev/null || true; ` +
-		`rm -f /etc/systemd/system/vpn-agent.service; ` +
-		`systemctl daemon-reload 2>/dev/null || true; ` +
-		`rm -rf /etc/vpn-agent; ` +
-		`rm -f /usr/local/bin/vpn-agent`
+// selfUninstallScript removes Xray, the agent's systemd service, binary and
+// config directory, and the nullsify-open-ports units and script the
+// control server's SSH bootstrap installs alongside the agent.
+const selfUninstallScript = `sleep 2; ` +
+	`systemctl stop vpn-agent 2>/dev/null || true; ` +
+	`systemctl disable vpn-agent 2>/dev/null || true; ` +
+	`systemctl disable --now nullsify-open-ports.path nullsify-open-ports.service 2>/dev/null || true; ` +
+	`bash -c "$(curl -fsSL ` + xray.InstallScriptURL + `)" @ remove --purge 2>/dev/null || true; ` +
+	`rm -f /etc/systemd/system/vpn-agent.service ` +
+	`/etc/systemd/system/nullsify-open-ports.path /etc/systemd/system/nullsify-open-ports.service ` +
+	`/usr/local/sbin/nullsify-open-ports; ` +
+	`systemctl daemon-reload 2>/dev/null || true; ` +
+	`rm -rf /etc/vpn-agent; ` +
+	`rm -f /usr/local/bin/vpn-agent`
 
+// uninstallAgent removes everything the bootstrap and installXray put on the
+// host (see selfUninstallScript). Because this action must kill the very
+// process running it, the teardown runs as a detached systemd-run transient
+// unit: that lets this handler return success (so the result gets reported
+// to the control server) before the agent's own service is stopped and its
+// files deleted.
+func (d *Dispatcher) uninstallAgent(ctx context.Context, _ json.RawMessage) (any, error) {
 	script := "systemd-run --unit=vpn-agent-uninstall --collect " +
-		"--description='vpn-agent self-uninstall' bash -c " + shellQuote(inner)
+		"--description='vpn-agent self-uninstall' bash -c " + shellQuote(selfUninstallScript)
 
 	res, err := system.RunShell(ctx, script)
 	if err != nil {

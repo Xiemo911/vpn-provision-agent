@@ -248,7 +248,14 @@ if [ "$("$GO" env GOVERSION 2>/dev/null)" != "` + goVersion + `" ]; then
   rm -f /tmp/go.tar.gz
 fi
 
-GOTOOLCHAIN=local GOBIN=/usr/local/bin "$GO" install github.com/amnezia-vpn/amneziawg-go@` + amneziaWGGoVersion + `
+# Build with throwaway module and build caches (about 100 MB), deleted on
+# exit whether or not the build works, instead of leaving them in /root.
+# -modcacherw keeps the module cache deletable. /var/tmp rather than /tmp,
+# which is often a small RAM-backed tmpfs.
+build_dir=$(mktemp -d /var/tmp/awg-build.XXXXXX)
+trap 'rm -rf "$build_dir"' EXIT
+GOPATH="$build_dir/gopath" GOCACHE="$build_dir/cache" GOFLAGS=-modcacherw \
+  GOTOOLCHAIN=local GOBIN=/usr/local/bin "$GO" install github.com/amnezia-vpn/amneziawg-go@` + amneziaWGGoVersion + `
 
 if ! command -v awg >/dev/null 2>&1 || ! command -v awg-quick >/dev/null 2>&1; then
   # -c protocol.version=1: GitHub's anonymous git-upload-pack over protocol
@@ -297,9 +304,19 @@ systemctl daemon-reload
 `
 }
 
+// uninstallScript also removes the Go toolchain Install put in /usr/local/go
+// (about 270 MB), but only when it's exactly the pinned version, so a Go the
+// VPS owner installed there themselves is left alone. The go/gofmt links
+// older agents created go with it, if they point into it.
 const uninstallScript = `systemctl disable --now ` + systemdUnit + ` 2>/dev/null || true
 rm -f /etc/systemd/system/awg-quick@.service
 systemctl daemon-reload 2>/dev/null || true
 rm -f /usr/local/bin/awg /usr/local/bin/awg-quick /usr/local/bin/amneziawg-go
 rm -rf /etc/amnezia
+if [ "$(/usr/local/go/bin/go env GOVERSION 2>/dev/null)" = "` + goVersion + `" ]; then
+  for link in /usr/local/bin/go /usr/local/bin/gofmt; do
+    case "$(readlink "$link" 2>/dev/null)" in /usr/local/go/*) rm -f "$link" ;; esac
+  done
+  rm -rf /usr/local/go
+fi
 `
