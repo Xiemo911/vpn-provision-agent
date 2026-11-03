@@ -57,17 +57,24 @@ func (m *Manager) Version(ctx context.Context) string {
 	return firstLine(res.Stdout)
 }
 
+// Pinned upstream versions, so an upstream release can't break every install
+// at once. Bump them together after testing an install.
+//
+// amneziawg-go and amneziawg-tools are the pair installs got before pinning
+// (the daemon via "@latest", which resolves to the last pre-v3 release since
+// the module moved to .../amneziawg-go/v3; the tools from the default
+// branch). Moving to the v3 daemon is a separate, deliberate upgrade.
+const (
+	goVersion             = "go1.26.10"
+	amneziaWGGoVersion    = "v0.2.19"
+	amneziaWGToolsVersion = "v3.1.20260812"
+)
+
 // Install builds/installs amneziawg-go (userspace implementation) and the
 // awg/awg-quick control tools, then registers the awg-quick@.service systemd
 // template unit.
-//
-// NOTE: the exact amneziawg-go / amneziawg-tools source locations and build
-// steps below should be re-verified against the current upstream READMEs
-// before relying on this in production — those repos move independently of
-// this agent's release cadence. The rest of the Manager's surface does not
-// depend on these exact commands.
 func (m *Manager) Install(ctx context.Context) (system.Result, error) {
-	return system.RunShell(ctx, installScript)
+	return system.RunShell(ctx, installScript())
 }
 
 // Uninstall removes AmneziaWG: stops the service, deletes the systemd unit,
@@ -190,20 +197,48 @@ func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
-const installScript = `set -e
-if ! command -v go >/dev/null 2>&1; then
-  ARCH=$(uname -m)
-  case "$ARCH" in
-    x86_64) GOARCH=amd64 ;;
-    aarch64|arm64) GOARCH=arm64 ;;
-    armv7l) GOARCH=arm ;;
-    *) echo "unsupported architecture: $ARCH" >&2; exit 1 ;;
-  esac
-  GOVER=1.23.4
+func installScript() string {
+	return system.PkgHelpers + `
+set -e
+export HOME="${HOME:-/root}"
+
+# amneziawg-go is a userspace daemon and needs a TUN device, which OpenVZ and
+# many LXC containers only provide once it's enabled in the provider's panel.
+modprobe tun >/dev/null 2>&1 || true
+if [ ! -c /dev/net/tun ]; then
+  echo "This VPS has no TUN device (/dev/net/tun), which AmneziaWG needs. It is usually an OpenVZ or LXC container: enable TUN/TAP in your provider's control panel, or use a KVM VPS." >&2
+  exit 1
+fi
+
+case "$(uname -m)" in
+  x86_64) GOARCH=amd64 ;;
+  aarch64|arm64) GOARCH=arm64 ;;
+  *) echo "unsupported architecture: $(uname -m)" >&2; exit 1 ;;
+esac
+
+# Build tools, plus what awg-quick needs at runtime: ip (iproute2) to bring
+# the interface up and iptables for the NAT rules in the server config.
+# Minimal Debian images ship without iptables, and awg-quick up then fails.
+if has_apt; then
+  pkg_install build-essential libmnl-dev pkg-config git ca-certificates curl iptables iproute2
+else
+  pkg_install gcc make libmnl-devel pkgconfig git ca-certificates curl iptables iproute
+fi
+for tool in make git iptables ip; do
+  if ! command -v "$tool" >/dev/null 2>&1; then
+    echo "$tool is still missing after installing packages" >&2
+    exit 1
+  fi
+done
+
+# Always the pinned Go in /usr/local/go, never a distro go found on PATH:
+# Debian 12 and Ubuntu 22.04 ship versions too old to build amneziawg-go.
+GO=/usr/local/go/bin/go
+if [ "$("$GO" env GOVERSION 2>/dev/null)" != "` + goVersion + `" ]; then
   for attempt in 1 2 3; do
-    curl -fsSL "https://go.dev/dl/go${GOVER}.linux-${GOARCH}.tar.gz" -o /tmp/go.tar.gz && break
+    curl -fsSL --connect-timeout 20 --max-time 600 -o /tmp/go.tar.gz "https://go.dev/dl/` + goVersion + `.linux-${GOARCH}.tar.gz" && break
     if [ "$attempt" = 3 ]; then
-      echo "go toolchain download failed after 3 attempts" >&2
+      echo "Go toolchain download failed after 3 attempts" >&2
       exit 1
     fi
     sleep 5
@@ -211,34 +246,11 @@ if ! command -v go >/dev/null 2>&1; then
   rm -rf /usr/local/go
   tar -C /usr/local -xzf /tmp/go.tar.gz
   rm -f /tmp/go.tar.gz
-  ln -sf /usr/local/go/bin/go /usr/local/bin/go
-  ln -sf /usr/local/go/bin/gofmt /usr/local/bin/gofmt
 fi
-export PATH=$PATH:/usr/local/go/bin
 
-GOBIN=/usr/local/bin go install github.com/amnezia-vpn/amneziawg-go@latest
+GOTOOLCHAIN=local GOBIN=/usr/local/bin "$GO" install github.com/amnezia-vpn/amneziawg-go@` + amneziaWGGoVersion + `
 
 if ! command -v awg >/dev/null 2>&1 || ! command -v awg-quick >/dev/null 2>&1; then
-  if command -v apt-get >/dev/null 2>&1; then
-    # A fresh VPS's first-boot cloud-init/unattended-upgrades run often holds
-    # the dpkg lock for a minute or two; retry instead of failing on it (and
-    # instead of silently swallowing the error, which previously let a real
-    # apt failure surface only later as a confusing "make" compiler error).
-    attempt=0
-    until apt-get update -y && apt-get install -y build-essential libmnl-dev pkg-config git; do
-      attempt=$((attempt + 1))
-      if [ "$attempt" -ge 10 ]; then
-        echo "apt-get install failed after 10 attempts (possibly a persistent dpkg lock)" >&2
-        break
-      fi
-      sleep 3
-    done
-  elif command -v yum >/dev/null 2>&1; then
-    yum install -y gcc make libmnl-devel pkgconfig git || \
-      echo "yum install failed; continuing, build may fail below" >&2
-  else
-    echo "no apt-get or yum found; cannot install build dependencies" >&2
-  fi
   # -c protocol.version=1: GitHub's anonymous git-upload-pack over protocol
   # v2 (git >=2.29 default) intermittently 401s on the stateless-RPC POST
   # even though the repo is public, which surfaces as a confusing "could not
@@ -247,7 +259,7 @@ if ! command -v awg >/dev/null 2>&1 || ! command -v awg-quick >/dev/null 2>&1; t
   # blip (unrelated to the protocol-v2 issue above).
   for attempt in 1 2 3; do
     rm -rf /tmp/amneziawg-tools
-    git -c protocol.version=1 clone --depth 1 https://github.com/amnezia-vpn/amneziawg-tools.git /tmp/amneziawg-tools && break
+    git -c protocol.version=1 clone --depth 1 --branch ` + amneziaWGToolsVersion + ` https://github.com/amnezia-vpn/amneziawg-tools.git /tmp/amneziawg-tools && break
     if [ "$attempt" = 3 ]; then
       echo "amneziawg-tools clone failed after 3 attempts" >&2
       exit 1
@@ -283,6 +295,7 @@ UNIT
 
 systemctl daemon-reload
 `
+}
 
 const uninstallScript = `systemctl disable --now ` + systemdUnit + ` 2>/dev/null || true
 rm -f /etc/systemd/system/awg-quick@.service

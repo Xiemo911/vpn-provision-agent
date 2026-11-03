@@ -4,6 +4,7 @@ package actions
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -52,6 +53,31 @@ func NewDispatcher(cfg *config.Config, mgr *xray.Manager, awgMgr *amneziawg.Mana
 	return d
 }
 
+// actionTimeout bounds how long one action may run. The agent runs actions
+// one at a time and doesn't poll meanwhile, so without a bound one hung
+// download or apt call would leave it unreachable for good. The control
+// server waits a little longer than the longest of these (35 minutes) before
+// failing an action as stalled.
+func actionTimeout(actionType string) time.Duration {
+	switch actionType {
+	case protocol.ActionInstallAmneziaWG:
+		// Waits for the dpkg lock, installs a compiler, downloads Go and
+		// builds amneziawg-go and its tools — slow on a 1-vCPU VPS.
+		return 25 * time.Minute
+	case protocol.ActionInstallXray:
+		return 15 * time.Minute
+	case protocol.ActionUninstallXray, protocol.ActionUninstallAmneziaWG, protocol.ActionUpdateAgent:
+		return 10 * time.Minute
+	default:
+		return 5 * time.Minute
+	}
+}
+
+// maxErrorLen caps a reported error: the control server keeps it in a TEXT
+// column, and a failed install's full output can be far longer. The end of
+// the output is kept, since that's where the actual failure is.
+const maxErrorLen = 8000
+
 // Execute runs an action and packages the result.
 func (d *Dispatcher) Execute(ctx context.Context, action protocol.Action) protocol.ActionResult {
 	res := protocol.ActionResult{
@@ -66,9 +92,17 @@ func (d *Dispatcher) Execute(ctx context.Context, action protocol.Action) protoc
 		return res
 	}
 
-	out, err := handler(ctx, action.Params)
+	timeout := actionTimeout(action.Type)
+	actx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	out, err := handler(actx, action.Params)
 	if err != nil {
-		res.Error = err.Error()
+		msg := err.Error()
+		if errors.Is(actx.Err(), context.DeadlineExceeded) {
+			msg = fmt.Sprintf("%s timed out after %s: %s", action.Type, timeout, msg)
+		}
+		res.Error = truncateHead(msg, maxErrorLen)
 		return res
 	}
 	res.Success = true
@@ -257,7 +291,7 @@ func (d *Dispatcher) uninstallAgent(ctx context.Context, _ json.RawMessage) (any
 	inner := `sleep 2; ` +
 		`systemctl stop vpn-agent 2>/dev/null || true; ` +
 		`systemctl disable vpn-agent 2>/dev/null || true; ` +
-		`bash -c "$(curl -fsSL https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ remove --purge 2>/dev/null || true; ` +
+		`bash -c "$(curl -fsSL ` + xray.InstallScriptURL + `)" @ remove --purge 2>/dev/null || true; ` +
 		`rm -f /etc/systemd/system/vpn-agent.service; ` +
 		`systemctl daemon-reload 2>/dev/null || true; ` +
 		`rm -rf /etc/vpn-agent; ` +
@@ -375,6 +409,14 @@ func (d *Dispatcher) removeAmneziaWGPeer(ctx context.Context, params json.RawMes
 }
 
 // --- helpers ---
+
+// truncateHead shortens s to at most max bytes by dropping its start.
+func truncateHead(s string, max int) string {
+	if len(s) <= max {
+		return s
+	}
+	return "…" + s[len(s)-max:]
+}
 
 func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"

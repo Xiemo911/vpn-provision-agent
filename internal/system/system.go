@@ -6,7 +6,13 @@ import (
 	"context"
 	"os/exec"
 	"strings"
+	"time"
 )
+
+// waitDelay bounds how long Run keeps reading output after the command's
+// context ends: a killed shell's children could otherwise hold the output
+// pipes open, and Run would never return.
+const waitDelay = 10 * time.Second
 
 // Result captures the output of a command.
 type Result struct {
@@ -21,9 +27,12 @@ func (r Result) Combined() string {
 }
 
 // Run executes name with args and returns the captured output. A non-zero exit
-// status is returned as a non-nil error along with a populated Result.
+// status is returned as a non-nil error along with a populated Result. When
+// ctx ends, the command and everything it started are killed.
 func Run(ctx context.Context, name string, args ...string) (Result, error) {
 	cmd := exec.CommandContext(ctx, name, args...)
+	killGroupOnCancel(cmd)
+	cmd.WaitDelay = waitDelay
 	var out, errBuf bytes.Buffer
 	cmd.Stdout = &out
 	cmd.Stderr = &errBuf

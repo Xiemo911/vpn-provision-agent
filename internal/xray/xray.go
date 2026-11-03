@@ -16,6 +16,31 @@ import (
 
 const defaultConfigPath = "/usr/local/etc/xray/config.json"
 
+// The official installer and the Xray release it installs are pinned, so an
+// upstream change can't break every install at once. Bump them together
+// after testing an install. Naming a version also stops the installer from
+// looking up the latest release through GitHub's rate-limited API.
+const (
+	// InstallScriptURL is XTLS/Xray-install's install-release.sh at a fixed
+	// commit.
+	InstallScriptURL = "https://raw.githubusercontent.com/XTLS/Xray-install/04e6f3bd9534811ed901a48c47b2c042dd64eb3a/install-release.sh"
+	// DefaultVersion is the Xray-core release installed when the control
+	// server doesn't ask for one.
+	DefaultVersion = "v26.10.31"
+)
+
+// installerScript runs the pinned installer with args. It's downloaded to a
+// file first: with bash -c "$(curl ...)" a failed download just ran an empty
+// script and "succeeded".
+func installerScript(args string) string {
+	return `set -e
+installer=$(mktemp)
+trap 'rm -f "$installer"' EXIT
+curl -fsSL --retry 3 --connect-timeout 20 --max-time 120 -o "$installer" ` + shellQuote(InstallScriptURL) + `
+bash "$installer" ` + args + `
+`
+}
+
 // Manager performs Xray operations against a single host.
 type Manager struct {
 	ConfigPath string
@@ -56,23 +81,34 @@ func (m *Manager) Version(ctx context.Context) string {
 	return ""
 }
 
-// Install runs the official Xray-install script. An empty version installs the
-// latest release.
+// Install runs the official Xray-install script. An empty version installs
+// DefaultVersion.
+//
+// The tools the installer needs are installed first, waiting out the dpkg
+// lock: the installer runs apt itself with no retry, so on a fresh VPS still
+// busy with its first-boot updates it failed straight away.
 func (m *Manager) Install(ctx context.Context, version string) (system.Result, error) {
-	// -f makes curl exit non-zero on a 4xx/5xx response instead of piping an
-	// HTML error page into `bash -c`, which would otherwise silently "succeed"
-	// while installing nothing.
-	script := `bash -c "$(curl -fsSL https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install`
-	if version != "" {
-		script += " --version " + shellQuote(version)
+	return system.RunShell(ctx, installScript(version))
+}
+
+func installScript(version string) string {
+	if version == "" {
+		version = DefaultVersion
 	}
-	return system.RunShell(ctx, script)
+	return system.PkgHelpers + `
+missing=""
+for tool in curl unzip gzip; do
+  command -v "$tool" >/dev/null 2>&1 || missing="$missing $tool"
+done
+if [ -n "$missing" ]; then
+  pkg_install $missing || exit 1
+fi
+` + installerScript("install --version "+shellQuote(version))
 }
 
 // Uninstall removes Xray via the official installer.
 func (m *Manager) Uninstall(ctx context.Context) (system.Result, error) {
-	script := `bash -c "$(curl -fsSL https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ remove --purge`
-	return system.RunShell(ctx, script)
+	return system.RunShell(ctx, installerScript("remove --purge"))
 }
 
 // Restart restarts (and enables) the xray service, and confirms it actually
