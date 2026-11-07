@@ -9,6 +9,8 @@ const UserErrorMarker = "NULLSIFY_ERROR: "
 // PkgHelpers is a shell snippet for install scripts. It defines:
 //
 //   - fail MESSAGE: print MESSAGE for the user (see UserErrorMarker), exit 1.
+//   - progress MESSAGE: say what the script is doing now (see
+//     ProgressMarker); shown on the task page.
 //   - pkg_install PKG...: install packages with apt-get, dnf or yum (the
 //     caller passes names for the package manager in use, telling them
 //     apart with has_apt).
@@ -28,7 +30,18 @@ export DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a
 
 fail() { echo "` + UserErrorMarker + `$*" >&2; exit 1; }
 
+progress() { echo "` + ProgressMarker + `$*"; }
+
 has_apt() { command -v apt-get >/dev/null 2>&1; }
+
+# Whether something else (usually the VPS's automatic updates) is using the
+# package manager right now, so apt-get is about to wait for it.
+apt_busy() {
+  if command -v fuser >/dev/null 2>&1; then
+    fuser /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock /var/lib/apt/lists/lock >/dev/null 2>&1 && return 0
+  fi
+  pgrep -x apt-get >/dev/null 2>&1 || pgrep -x apt >/dev/null 2>&1 || pgrep -x dpkg >/dev/null 2>&1
+}
 
 repair_dpkg() {
   if [ -n "$(ls -A /var/lib/dpkg/updates 2>/dev/null)" ] || [ -n "$(dpkg --audit 2>/dev/null)" ]; then
@@ -42,6 +55,9 @@ pkg_install() {
       timeout 600 cloud-init status --wait >/dev/null 2>&1 || true
     fi
     for attempt in 1 2 3 4 5 6; do
+      if apt_busy; then
+        progress "Waiting for the VPS to finish its automatic updates (this can take 10-20 minutes on a new VPS)"
+      fi
       repair_dpkg
       apt-get -q -o DPkg::Lock::Timeout=300 update >/dev/null 2>&1 || true
       if apt-get -q -y -o DPkg::Lock::Timeout=300 install --no-install-recommends "$@"; then

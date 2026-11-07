@@ -45,6 +45,11 @@ func (f *fakeServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		f.events = append(f.events, "result "+res.ID+" "+http.StatusText(code))
 		w.WriteHeader(code)
 		_, _ = w.Write([]byte("{}"))
+	case "/api/agent/progress":
+		var p protocol.ProgressReport
+		_ = json.NewDecoder(r.Body).Decode(&p)
+		f.events = append(f.events, "progress "+p.ID+" "+p.Message)
+		_, _ = w.Write([]byte("{}"))
 	default:
 		w.WriteHeader(http.StatusNotFound)
 	}
@@ -157,4 +162,23 @@ func TestStaleQueuedResultIsDropped(t *testing.T) {
 	if len(a.unsent) != 0 {
 		t.Fatalf("unsent = %d, want 0", len(a.unsent))
 	}
+}
+
+// A script's progress lines reach the control server while the action runs,
+// before its result.
+func TestProgressLinesAreSentDuringTheAction(t *testing.T) {
+	params, _ := json.Marshal(map[string]string{
+		"command": "echo 'NULLSIFY_PROGRESS: Step one'; echo noise; echo 'NULLSIFY_PROGRESS: Step two'",
+	})
+	f := &fakeServer{queue: []protocol.Action{{ID: "a1", Type: protocol.ActionRunCommand, Params: params}}}
+	a := newTestAgent(t, f)
+	a.cfg.AllowRunCommand = true
+
+	a.drain(context.Background())
+
+	expectEvents(t, f.takeEvents(),
+		"poll",
+		"progress a1 Step one", "progress a1 Step two",
+		"result a1 OK",
+		"poll")
 }

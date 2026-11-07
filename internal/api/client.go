@@ -50,6 +50,11 @@ func (c *Client) ReportResult(ctx context.Context, res protocol.ActionResult) er
 	return c.do(ctx, "/api/agent/result", res, nil)
 }
 
+// ReportProgress says what a running action is doing right now.
+func (c *Client) ReportProgress(ctx context.Context, actionID, message string) error {
+	return c.do(ctx, "/api/agent/progress", protocol.ProgressReport{ID: actionID, AgentID: c.agentID, Message: message}, nil)
+}
+
 func (c *Client) do(ctx context.Context, path string, body, out any) error {
 	payload, err := json.Marshal(body)
 	if err != nil {

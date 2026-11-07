@@ -1,18 +1,32 @@
 package amneziawg
 
 import (
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 )
 
-func TestInstallScriptParses(t *testing.T) {
+// checkParses syntax-checks a script with bash -n. The script goes through
+// a file: passed as an argument, Windows' command-line quoting mangles a
+// long script full of quotes before Git Bash sees it.
+func checkParses(t *testing.T, script string) {
+	t.Helper()
 	if _, err := exec.LookPath("bash"); err != nil {
 		t.Skip("bash not available")
 	}
-	if out, err := exec.Command("bash", "-n", "-c", installScript()).CombinedOutput(); err != nil {
-		t.Fatalf("install script doesn't parse: %v\n%s", err, out)
+	path := filepath.Join(t.TempDir(), "script.sh")
+	if err := os.WriteFile(path, []byte(script), 0o644); err != nil {
+		t.Fatal(err)
 	}
+	if out, err := exec.Command("bash", "-n", filepath.ToSlash(path)).CombinedOutput(); err != nil {
+		t.Fatalf("script doesn't parse: %v\n%s", err, out)
+	}
+}
+
+func TestInstallScriptParses(t *testing.T) {
+	checkParses(t, installScript())
 }
 
 func TestInstallScriptPinsVersions(t *testing.T) {
@@ -33,12 +47,7 @@ func TestInstallScriptPinsVersions(t *testing.T) {
 }
 
 func TestUninstallScriptParses(t *testing.T) {
-	if _, err := exec.LookPath("bash"); err != nil {
-		t.Skip("bash not available")
-	}
-	if out, err := exec.Command("bash", "-n", "-c", uninstallScript).CombinedOutput(); err != nil {
-		t.Fatalf("uninstall script doesn't parse: %v\n%s", err, out)
-	}
+	checkParses(t, uninstallScript)
 }
 
 // /usr/local/go may be the VPS owner's own Go: neither script may touch it.

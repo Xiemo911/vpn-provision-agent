@@ -4,6 +4,7 @@ package system
 import (
 	"bytes"
 	"context"
+	"io"
 	"os/exec"
 	"strings"
 	"time"
@@ -35,6 +36,9 @@ func Run(ctx context.Context, name string, args ...string) (Result, error) {
 	cmd.WaitDelay = waitDelay
 	var out, errBuf bytes.Buffer
 	cmd.Stdout = &out
+	if report := progressFrom(ctx); report != nil {
+		cmd.Stdout = io.MultiWriter(&out, &progressWriter{report: report})
+	}
 	cmd.Stderr = &errBuf
 
 	err := cmd.Run()

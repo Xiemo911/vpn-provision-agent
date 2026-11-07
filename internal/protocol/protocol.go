@@ -25,6 +25,8 @@ type AgentStatus struct {
 	AmneziaWGVersion   string `json:"amneziawg_version,omitempty"`
 
 	UptimeSeconds int64 `json:"uptime_seconds,omitempty"`
+
+	Capabilities []string `json:"capabilities,omitempty"`
 }
 
 // PollResponse is returned by the control server with any pending work.
@@ -49,6 +51,14 @@ type ActionResult struct {
 	Timestamp int64           `json:"timestamp"`
 }
 
+// ProgressReport says what a running action is doing right now; the control
+// server shows it on the action's task page.
+type ProgressReport struct {
+	ID      string `json:"id"` // action id
+	AgentID string `json:"agent_id"`
+	Message string `json:"message"`
+}
+
 // Action type identifiers.
 const (
 	ActionInstallXray    = "install_xray"
@@ -69,4 +79,12 @@ const (
 	ActionApplyAmneziaWGConfig = "apply_amneziawg_config"
 	ActionAddAmneziaWGPeer     = "add_amneziawg_peer"
 	ActionRemoveAmneziaWGPeer  = "remove_amneziawg_peer"
+
+	// ActionPickUDPPort finds a free UDP port for WireGuard/AmneziaWG
+	// before a protocol switch to it (see Capabilities).
+	ActionPickUDPPort = "pick_udp_port"
 )
+
+// Capabilities are the actions newer than the first agents, reported with
+// every poll so the control server only queues what this agent can run.
+var Capabilities = []string{ActionPickUDPPort}

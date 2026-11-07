@@ -12,6 +12,7 @@ import (
 	"github.com/Xiemo911/vpn-provision-agent/internal/api"
 	"github.com/Xiemo911/vpn-provision-agent/internal/config"
 	"github.com/Xiemo911/vpn-provision-agent/internal/protocol"
+	"github.com/Xiemo911/vpn-provision-agent/internal/system"
 	"github.com/Xiemo911/vpn-provision-agent/internal/xray"
 )
 
@@ -125,7 +126,7 @@ func (a *Agent) tick(ctx context.Context) bool {
 	log.Printf("received %d action(s)", len(resp.Actions))
 	for _, action := range resp.Actions {
 		log.Printf("executing action %s (%s)", action.ID, action.Type)
-		result := a.dispatcher.Execute(ctx, action)
+		result := a.dispatcher.Execute(system.WithProgress(ctx, a.progressReporter(ctx, action.ID)), action)
 		if result.Success {
 			log.Printf("action %s succeeded", action.ID)
 		} else {
@@ -134,6 +135,23 @@ func (a *Agent) tick(ctx context.Context) bool {
 		a.report(ctx, result)
 	}
 	return true
+}
+
+// progressTimeout bounds one progress report: the script's output waits on
+// it, and progress is only nice to have.
+const progressTimeout = 5 * time.Second
+
+// progressReporter returns the function an action's scripts report their
+// progress lines to: each one is sent to the control server, best effort.
+func (a *Agent) progressReporter(ctx context.Context, actionID string) func(string) {
+	return func(msg string) {
+		log.Printf("action %s: %s", actionID, msg)
+		pctx, cancel := context.WithTimeout(ctx, progressTimeout)
+		defer cancel()
+		if err := a.api.ReportProgress(pctx, actionID, msg); err != nil {
+			log.Printf("failed to report progress of %s: %v", actionID, err)
+		}
+	}
 }
 
 // report sends a result, retrying briefly, and queues it for resending if
@@ -202,5 +220,7 @@ func (a *Agent) status(ctx context.Context) protocol.AgentStatus {
 		AmneziaWGVersion:   a.amneziawg.Version(ctx),
 
 		UptimeSeconds: int64(time.Since(a.startTime).Seconds()),
+
+		Capabilities: protocol.Capabilities,
 	}
 }

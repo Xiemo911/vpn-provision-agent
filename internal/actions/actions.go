@@ -49,6 +49,7 @@ func NewDispatcher(cfg *config.Config, mgr *xray.Manager, awgMgr *amneziawg.Mana
 		protocol.ActionApplyAmneziaWGConfig: d.applyAmneziaWGConfig,
 		protocol.ActionAddAmneziaWGPeer:     d.addAmneziaWGPeer,
 		protocol.ActionRemoveAmneziaWGPeer:  d.removeAmneziaWGPeer,
+		protocol.ActionPickUDPPort:          d.pickUDPPort,
 	}
 	return d
 }

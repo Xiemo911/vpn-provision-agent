@@ -220,6 +220,7 @@ export HOME="${HOME:-/root}"
 
 # amneziawg-go is a userspace daemon and needs a TUN device, which OpenVZ and
 # many LXC containers only provide once it's enabled in the provider's panel.
+progress "Checking the VPS"
 modprobe tun >/dev/null 2>&1 || true
 [ -c /dev/net/tun ] || fail "This VPS has no TUN device (/dev/net/tun), which AmneziaWG and WireGuard need. It's usually an OpenVZ or LXC container: enable TUN/TAP in your provider's control panel, or use a KVM VPS."
 
@@ -239,6 +240,7 @@ need_disk ` + strconv.Itoa(installDiskMB) + `
 # Build tools, plus what awg-quick needs at runtime: ip (iproute2) to bring
 # the interface up and iptables for the NAT rules in the server config.
 # Minimal Debian images ship without iptables, and awg-quick up then fails.
+progress "Installing build tools"
 if has_apt; then
   pkg_install build-essential libmnl-dev pkg-config git ca-certificates curl iptables iproute2
 else
@@ -250,6 +252,7 @@ done
 iptables -t nat -L -n >/dev/null 2>&1 ||
   fail "This VPS doesn't allow NAT in its firewall (iptables' nat table), which the VPN needs to give clients internet access. That's common on LXC/OpenVZ containers: use a KVM VPS."
 
+progress "Checking the VPS can reach the download sites"
 need_hosts "AmneziaWG" go.dev dl.google.com proxy.golang.org github.com
 
 # Build in a throwaway directory (Go's module and build caches, about 100
@@ -267,6 +270,7 @@ trap cleanup EXIT
 # Ubuntu 22.04 ship versions too old to build amneziawg-go.
 GO=` + goRoot + `/bin/go
 if [ "$("$GO" env GOVERSION 2>/dev/null)" != "` + goVersion + `" ]; then
+  progress "Downloading Go (needed to build AmneziaWG)"
   for attempt in 1 2 3; do
     curl -fsSL --connect-timeout 20 --max-time 600 -o "$build_dir/go.tar.gz" "https://go.dev/dl/` + goVersion + `.linux-${GOARCH}.tar.gz" && break
     [ "$attempt" = 3 ] && fail "Couldn't download the Go toolchain from go.dev to build AmneziaWG. Try again in a few minutes."
@@ -298,11 +302,13 @@ if [ "$avail_mb" -lt 1536 ]; then
   fi
 fi
 
+progress "Building AmneziaWG (this takes a minute or two, longer on a small VPS)"
 GOPATH="$build_dir/gopath" GOCACHE="$build_dir/cache" GOFLAGS=-modcacherw GOTOOLCHAIN=local GOBIN=/usr/local/bin \
   "$GO" install $build_flags github.com/amnezia-vpn/amneziawg-go@` + amneziaWGGoVersion + ` ||
   fail "Building AmneziaWG on the VPS failed. On a VPS with 1 GB of memory or less that's usually the build running out of memory: try a VPS with more RAM. Otherwise, try again."
 
 if ! command -v awg >/dev/null 2>&1 || ! command -v awg-quick >/dev/null 2>&1; then
+  progress "Building the AmneziaWG tools"
   # -c protocol.version=1: GitHub's anonymous git-upload-pack over protocol
   # v2 (git >=2.29 default) intermittently 401s on the stateless-RPC POST
   # even though the repo is public, which surfaces as a confusing "could not
@@ -321,6 +327,7 @@ if ! command -v awg >/dev/null 2>&1 || ! command -v awg-quick >/dev/null 2>&1; t
   rm -rf /tmp/amneziawg-tools
 fi
 
+progress "Finishing the install"
 mkdir -p /etc/systemd/system
 cat > /etc/systemd/system/awg-quick@.service <<'UNIT'
 [Unit]

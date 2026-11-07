@@ -96,15 +96,18 @@ func installScript(version string) string {
 		version = DefaultVersion
 	}
 	return system.PkgHelpers + `
+progress "Checking the VPS"
 need_disk 300
 missing=""
 for tool in curl unzip gzip; do
   command -v "$tool" >/dev/null 2>&1 || missing="$missing $tool"
 done
 if [ -n "$missing" ]; then
+  progress "Installing download tools"
   pkg_install $missing || exit 1
 fi
 need_hosts "Xray" raw.githubusercontent.com github.com
+progress "Downloading and installing Xray"
 ` + installerScript("install --version "+shellQuote(version)) + `
 # Marks this Xray as Nullsify's, so a later install on this VPS can tell it
 # from someone else's (which it must not overwrite). The installer's
