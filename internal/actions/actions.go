@@ -297,15 +297,32 @@ const selfUninstallScript = `sleep 2; ` +
 	`rm -rf /etc/vpn-agent; ` +
 	`rm -f /usr/local/bin/vpn-agent`
 
+// openRCSelfUninstallScript is selfUninstallScript for OpenRC (Alpine),
+// where the bootstrap installs init scripts instead of systemd units and
+// Xray isn't installed by the official installer. The agent's own service
+// is stopped last, in case stopping it takes this script down with it.
+const openRCSelfUninstallScript = "sleep 2\n" +
+	"rc-service nullsify-open-ports stop >/dev/null 2>&1 || true\n" +
+	"rc-update del nullsify-open-ports default >/dev/null 2>&1 || true\n" +
+	xray.OpenRCUninstallScript +
+	"rm -f /etc/init.d/nullsify-open-ports /usr/local/sbin/nullsify-open-ports\n" +
+	"rm -rf /etc/vpn-agent\n" +
+	"rc-update del vpn-agent default >/dev/null 2>&1 || true\n" +
+	"rc-service vpn-agent stop >/dev/null 2>&1 || true\n" +
+	"rm -f /etc/init.d/vpn-agent /usr/local/bin/vpn-agent\n"
+
 // uninstallAgent removes everything the bootstrap and installXray put on the
 // host (see selfUninstallScript). Because this action must kill the very
-// process running it, the teardown runs as a detached systemd-run transient
-// unit: that lets this handler return success (so the result gets reported
-// to the control server) before the agent's own service is stopped and its
-// files deleted.
+// process running it, the teardown runs detached: as a systemd-run transient
+// unit, or on OpenRC in a new session of its own. That lets this handler
+// return success (so the result gets reported to the control server) before
+// the agent's own service is stopped and its files deleted.
 func (d *Dispatcher) uninstallAgent(ctx context.Context, _ json.RawMessage) (any, error) {
 	script := "systemd-run --unit=vpn-agent-uninstall --collect " +
 		"--description='vpn-agent self-uninstall' bash -c " + shellQuote(selfUninstallScript)
+	if system.IsOpenRC() {
+		script = "setsid sh -c " + shellQuote(openRCSelfUninstallScript) + " </dev/null >/dev/null 2>&1 &"
+	}
 
 	res, err := system.RunShell(ctx, script)
 	if err != nil {

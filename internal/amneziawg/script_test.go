@@ -92,3 +92,35 @@ func TestInstallChecksTheVPSFirst(t *testing.T) {
 		}
 	}
 }
+
+func TestInstallSupportsRHELAndAlpine(t *testing.T) {
+	script := installScript()
+	for _, want := range []string{
+		"elif has_apk; then",
+		"pkg_install build-base linux-headers git ca-certificates curl iptables iproute2 bash tar",
+		"dnf install -y iptables-nft",
+		"if is_openrc; then",
+		"/etc/init.d/" + openRCService,
+		"if firewalld_running; then",
+		"--zone=trusted --add-interface=" + ifaceName,
+		"--add-masquerade",
+	} {
+		if !strings.Contains(script, want) {
+			t.Errorf("install script lacks %q", want)
+		}
+	}
+	if strings.Contains(script, "libmnl-devel") {
+		t.Error("install script asks for libmnl-devel, which RHEL 9 only has in CRB")
+	}
+	for _, want := range []string{"#!/sbin/openrc-run", "awg-quick up " + ifaceName, "awg-quick down " + ifaceName,
+		"WG_QUICK_USERSPACE_IMPLEMENTATION=/usr/local/bin/amneziawg-go"} {
+		if !strings.Contains(openRCInitScript, want) {
+			t.Errorf("OpenRC init script lacks %q", want)
+		}
+	}
+	for _, want := range []string{"rc-update del " + openRCService, "rm -f /etc/init.d/" + openRCService, "--remove-interface=" + ifaceName} {
+		if !strings.Contains(uninstallScript, want) {
+			t.Errorf("uninstall script lacks %q", want)
+		}
+	}
+}

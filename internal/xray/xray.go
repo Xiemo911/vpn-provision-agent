@@ -16,6 +16,10 @@ import (
 
 const defaultConfigPath = "/usr/local/etc/xray/config.json"
 
+// service is Xray's service: the official installer's systemd unit, or on
+// OpenRC (Alpine) the init script openRCInstall writes.
+var service = system.Service{Systemd: "xray", OpenRC: "xray"}
+
 // The official installer and the Xray release it installs are pinned, so an
 // upstream change can't break every install at once. Bump them together
 // after testing an install. Naming a version also stops the installer from
@@ -63,10 +67,9 @@ func (m *Manager) IsInstalled() bool {
 	return err == nil
 }
 
-// IsRunning reports whether the xray systemd service is active.
+// IsRunning reports whether the xray service is active.
 func (m *Manager) IsRunning(ctx context.Context) bool {
-	res, _ := system.Run(ctx, "systemctl", "is-active", "xray")
-	return strings.TrimSpace(res.Stdout) == "active"
+	return service.IsActive(ctx)
 }
 
 // Version returns the installed Xray version string, or "" if unavailable.
@@ -81,19 +84,27 @@ func (m *Manager) Version(ctx context.Context) string {
 	return ""
 }
 
-// Install runs the official Xray-install script. An empty version installs
-// DefaultVersion.
+// Install installs Xray. An empty version installs DefaultVersion.
 //
-// The tools the installer needs are installed first, waiting out the dpkg
-// lock: the installer runs apt itself with no retry, so on a fresh VPS still
-// busy with its first-boot updates it failed straight away.
+// On systemd hosts it runs the official Xray-install script. The tools the
+// installer needs are installed first, waiting out the dpkg lock: the
+// installer runs apt itself with no retry, so on a fresh VPS still busy
+// with its first-boot updates it failed straight away.
+//
+// The official installer only supports systemd, so on OpenRC (Alpine) the
+// release is installed directly instead (see openRCInstall), to the same
+// paths.
 func (m *Manager) Install(ctx context.Context, version string) (system.Result, error) {
-	return system.RunShell(ctx, installScript(version))
+	return system.RunShell(ctx, installScript(version, system.IsOpenRC()))
 }
 
-func installScript(version string) string {
+func installScript(version string, openrc bool) string {
 	if version == "" {
 		version = DefaultVersion
+	}
+	install := installerScript("install --version " + shellQuote(version))
+	if openrc {
+		install = openRCInstall(version)
 	}
 	return system.PkgHelpers + `
 progress "Checking the VPS"
@@ -108,7 +119,7 @@ if [ -n "$missing" ]; then
 fi
 need_hosts "Xray" raw.githubusercontent.com github.com
 progress "Downloading and installing Xray"
-` + installerScript("install --version "+shellQuote(version)) + `
+` + install + `
 # Marks this Xray as Nullsify's, so a later install on this VPS can tell it
 # from someone else's (which it must not overwrite). The installer's
 # "remove --purge" deletes it along with the rest of the directory.
@@ -116,25 +127,92 @@ mkdir -p ` + markerDir + ` && touch ` + markerDir + `/.nullsify
 `
 }
 
+// openRCInstall installs an Xray release from GitHub where the official
+// installer would (/usr/local/bin/xray, geo files in shareDir, config in
+// /usr/local/etc/xray), checking the download against the release's .dgst
+// checksums, and writes an OpenRC init script equivalent to the
+// installer's systemd unit: Xray runs as nobody, allowed to bind ports
+// below 1024.
+func openRCInstall(version string) string {
+	return `set -e
+case "$(uname -m)" in
+  x86_64|amd64) asset=Xray-linux-64.zip ;;
+  aarch64|arm64) asset=Xray-linux-arm64-v8a.zip ;;
+  *) fail "This VPS's CPU architecture ($(uname -m)) isn't supported. Use a 64-bit (x86-64 or ARM64) VPS." ;;
+esac
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT
+url="https://github.com/XTLS/Xray-core/releases/download/"` + shellQuote(version) + `"/$asset"
+curl -fsSL --retry 3 --connect-timeout 20 --max-time 300 -o "$tmp/xray.zip" "$url" &&
+  curl -fsSL --retry 3 --connect-timeout 20 --max-time 60 -o "$tmp/xray.zip.dgst" "$url.dgst" ||
+  fail "Couldn't download Xray from github.com. Try again in a few minutes."
+want=$(awk -F '= ' '/256=/ {print $2; exit}' "$tmp/xray.zip.dgst")
+got=$(sha256sum "$tmp/xray.zip" | awk '{print $1}')
+if [ -z "$want" ] || [ "$want" != "$got" ]; then
+  fail "The Xray download from github.com didn't match its checksum. Try again in a few minutes."
+fi
+mkdir -p "$tmp/x" ` + shareDir + ` ` + markerDir + `
+unzip -q -o "$tmp/xray.zip" -d "$tmp/x"
+install -m 0755 "$tmp/x/xray" /usr/local/bin/xray
+for f in geoip.dat geosite.dat; do
+  if [ -f "$tmp/x/$f" ]; then install -m 0644 "$tmp/x/$f" ` + shareDir + `/$f; fi
+done
+if [ ! -f ` + defaultConfigPath + ` ]; then echo '{}' > ` + defaultConfigPath + `; fi
+cat > /etc/init.d/xray <<'INIT'
+` + openRCInitScript + `INIT
+chmod 0755 /etc/init.d/xray
+`
+}
+
+// shareDir holds Xray's geoip/geosite files; Xray looks there by default.
+const shareDir = "/usr/local/share/xray"
+
+const openRCInitScript = `#!/sbin/openrc-run
+name="xray"
+description="Xray"
+command="/usr/local/bin/xray"
+command_args="run -config ` + defaultConfigPath + `"
+command_user="nobody:nobody"
+capabilities="^cap_net_bind_service"
+supervisor=supervise-daemon
+respawn_delay=5
+respawn_max=0
+
+depend() {
+  need net
+  after firewall
+}
+`
+
+// OpenRCUninstallScript removes what openRCInstall installed, config
+// included (like the official installer's "remove --purge").
+const OpenRCUninstallScript = `rc-service xray stop >/dev/null 2>&1 || true
+rc-update del xray default >/dev/null 2>&1 || true
+rm -f /etc/init.d/xray /usr/local/bin/xray
+rm -rf ` + shareDir + ` ` + markerDir + ` /var/log/xray
+`
+
 // markerDir holds the marker file that says Nullsify installed this Xray;
 // the control server's pre-install check looks for it.
 const markerDir = "/usr/local/etc/xray"
 
-// Uninstall removes Xray via the official installer.
+// Uninstall removes Xray: via the official installer, or on OpenRC with
+// OpenRCUninstallScript.
 func (m *Manager) Uninstall(ctx context.Context) (system.Result, error) {
+	if system.IsOpenRC() {
+		return system.RunShell(ctx, OpenRCUninstallScript)
+	}
 	return system.RunShell(ctx, installerScript("remove --purge"))
 }
 
 // Restart restarts (and enables) the xray service, and confirms it actually
-// reaches the active state rather than trusting systemctl's exit code alone
-// (a Type=simple unit can report a successful restart and then crash-loop).
+// reaches the active state rather than trusting the init system's exit
+// code alone (a Type=simple unit can report a successful restart and then
+// crash-loop).
 func (m *Manager) Restart(ctx context.Context) (system.Result, error) {
-	if res, err := system.Run(ctx, "systemctl", "enable", "xray"); err != nil {
-		return res, fmt.Errorf("enable xray: %s", res.Combined())
-	}
-	res, err := system.Run(ctx, "systemctl", "restart", "xray")
+	res, err := service.EnableAndRestart(ctx)
 	if err != nil {
-		return res, fmt.Errorf("restart xray: %s", res.Combined())
+		return res, err
 	}
 	if !m.waitRunning(ctx) {
 		return res, fmt.Errorf("restart xray: service did not reach active state")

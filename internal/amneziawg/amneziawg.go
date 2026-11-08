@@ -20,7 +20,12 @@ const (
 	defaultConfigPath = "/etc/amnezia/amneziawg/awg0.conf"
 	ifaceName         = "awg0"
 	systemdUnit       = "awg-quick@" + ifaceName
+	openRCService     = "awg-quick"
 )
+
+// service runs awg-quick for awg0: a systemd template instance, or on
+// OpenRC (Alpine) the init script installScript writes.
+var service = system.Service{Systemd: systemdUnit, OpenRC: openRCService}
 
 // Manager performs AmneziaWG operations against a single host.
 type Manager struct {
@@ -42,10 +47,9 @@ func (m *Manager) IsInstalled() bool {
 	return errAwg == nil && errQuick == nil
 }
 
-// IsRunning reports whether the awg-quick@awg0 systemd service is active.
+// IsRunning reports whether the awg0 service is active.
 func (m *Manager) IsRunning(ctx context.Context) bool {
-	res, _ := system.Run(ctx, "systemctl", "is-active", systemdUnit)
-	return strings.TrimSpace(res.Stdout) == "active"
+	return service.IsActive(ctx)
 }
 
 // Version returns the installed awg (control tool) version string, or "" if
@@ -73,30 +77,27 @@ const (
 
 // Install builds/installs amneziawg-go (userspace implementation) and the
 // awg/awg-quick control tools, then registers the awg-quick@.service systemd
-// template unit.
+// template unit (or on OpenRC, the awg-quick init script).
 func (m *Manager) Install(ctx context.Context) (system.Result, error) {
 	return system.RunShell(ctx, installScript())
 }
 
-// Uninstall removes AmneziaWG: stops the service, deletes the systemd unit,
-// the installed binaries, and the config directory.
+// Uninstall removes AmneziaWG: stops the service, deletes its unit or init
+// script, the installed binaries, and the config directory.
 func (m *Manager) Uninstall(ctx context.Context) (system.Result, error) {
 	return system.RunShell(ctx, uninstallScript)
 }
 
-// Restart enables and restarts the awg-quick@awg0 service, and confirms it
-// actually reaches the active state rather than trusting systemctl's exit
+// Restart enables and restarts the awg0 service, and confirms it actually
+// reaches the active state rather than trusting the init system's exit
 // code alone.
 func (m *Manager) Restart(ctx context.Context) (system.Result, error) {
-	if res, err := system.Run(ctx, "systemctl", "enable", systemdUnit); err != nil {
-		return res, fmt.Errorf("enable %s: %s", systemdUnit, res.Combined())
-	}
-	res, err := system.Run(ctx, "systemctl", "restart", systemdUnit)
+	res, err := service.EnableAndRestart(ctx)
 	if err != nil {
-		return res, fmt.Errorf("restart %s: %s", systemdUnit, res.Combined())
+		return res, err
 	}
 	if !m.waitRunning(ctx) {
-		return res, fmt.Errorf("restart %s: service did not reach active state", systemdUnit)
+		return res, fmt.Errorf("restart %s: service did not reach active state", service.Name())
 	}
 	return res, nil
 }
@@ -240,11 +241,20 @@ need_disk ` + strconv.Itoa(installDiskMB) + `
 # Build tools, plus what awg-quick needs at runtime: ip (iproute2) to bring
 # the interface up and iptables for the NAT rules in the server config.
 # Minimal Debian images ship without iptables, and awg-quick up then fails.
+# awg-quick is a bash script, which Alpine doesn't ship. libmnl isn't needed
+# by the tools any more; RHEL 9 only has its headers in the CRB repository,
+# so they're not asked for there.
 progress "Installing build tools"
 if has_apt; then
   pkg_install build-essential libmnl-dev pkg-config git ca-certificates curl iptables iproute2
+elif has_apk; then
+  pkg_install build-base linux-headers git ca-certificates curl iptables iproute2 bash tar
 else
-  pkg_install gcc make libmnl-devel pkgconfig git ca-certificates curl iptables iproute
+  pkg_install gcc make git ca-certificates curl iproute tar gzip
+  # RHEL 9 and later call the package iptables-nft; 8 still calls it iptables.
+  if ! command -v iptables >/dev/null 2>&1; then
+    { command -v dnf >/dev/null 2>&1 && dnf install -y iptables-nft; } || pkg_install iptables
+  fi
 fi
 for tool in make git iptables ip; do
   command -v "$tool" >/dev/null 2>&1 || fail "$tool is still missing on the VPS after installing packages."
@@ -328,6 +338,11 @@ if ! command -v awg >/dev/null 2>&1 || ! command -v awg-quick >/dev/null 2>&1; t
 fi
 
 progress "Finishing the install"
+if is_openrc; then
+  cat > /etc/init.d/` + openRCService + ` <<'INIT'
+` + openRCInitScript + `INIT
+  chmod 0755 /etc/init.d/` + openRCService + `
+else
 mkdir -p /etc/systemd/system
 cat > /etc/systemd/system/awg-quick@.service <<'UNIT'
 [Unit]
@@ -348,15 +363,53 @@ Environment=WG_QUICK_USERSPACE_IMPLEMENTATION=/usr/local/bin/amneziawg-go
 [Install]
 WantedBy=multi-user.target
 UNIT
+systemctl daemon-reload
+fi
+
+# firewalld (RHEL family) drops forwarded traffic and NATs nothing by
+# default, whatever iptables rules awg-quick adds: trust the VPN interface
+# so clients' traffic is forwarded, and masquerade it out of the default
+# zone. Both now and in the saved config, so it survives a reboot.
+if firewalld_running; then
+  for args in "--zone=trusted --add-interface=` + ifaceName + `" "--add-masquerade"; do
+    firewall-cmd $args >/dev/null 2>&1 || true
+    firewall-cmd --permanent $args >/dev/null 2>&1 || true
+  done
+fi
 
 # Marks this AmneziaWG as Nullsify's, so a later install on this VPS can tell
 # it from someone else's (which it must not overwrite). Uninstall removes it
 # with the rest of /etc/amnezia.
 mkdir -p ` + markerDir + ` && touch ` + markerDir + `/.nullsify
-
-systemctl daemon-reload
 `
 }
+
+// openRCInitScript brings awg0 up and down with awg-quick on OpenRC, like
+// the awg-quick@.service template does under systemd.
+const openRCInitScript = `#!/sbin/openrc-run
+description="AmneziaWG via awg-quick for ` + ifaceName + `"
+
+depend() {
+  need net
+  after firewall iptables
+}
+
+start() {
+  ebegin "Starting AmneziaWG ` + ifaceName + `"
+  export PATH="/usr/local/sbin:/usr/local/bin:$PATH"
+  export WG_ENDPOINT_RESOLUTION_RETRIES=infinity
+  export WG_QUICK_USERSPACE_IMPLEMENTATION=/usr/local/bin/amneziawg-go
+  /usr/local/bin/awg-quick up ` + ifaceName + `
+  eend $?
+}
+
+stop() {
+  ebegin "Stopping AmneziaWG ` + ifaceName + `"
+  export PATH="/usr/local/sbin:/usr/local/bin:$PATH"
+  /usr/local/bin/awg-quick down ` + ifaceName + `
+  eend $?
+}
+`
 
 // markerDir holds the marker file that says Nullsify installed this
 // AmneziaWG; the control server's pre-install check looks for it.
@@ -365,9 +418,19 @@ const markerDir = "/etc/amnezia/amneziawg"
 // uninstallScript also removes the Go toolchain Install keeps in goRoot
 // (about 270 MB). /usr/local/go is never touched: it may be the VPS
 // owner's own Go.
-const uninstallScript = `systemctl disable --now ` + systemdUnit + ` 2>/dev/null || true
-rm -f /etc/systemd/system/awg-quick@.service
-systemctl daemon-reload 2>/dev/null || true
+const uninstallScript = `if [ ! -d /run/systemd/system ] && [ -x /sbin/openrc-run ]; then
+  rc-service ` + openRCService + ` stop >/dev/null 2>&1 || true
+  rc-update del ` + openRCService + ` default >/dev/null 2>&1 || true
+  rm -f /etc/init.d/` + openRCService + `
+else
+  systemctl disable --now ` + systemdUnit + ` 2>/dev/null || true
+  rm -f /etc/systemd/system/awg-quick@.service
+  systemctl daemon-reload 2>/dev/null || true
+fi
+if command -v firewall-cmd >/dev/null 2>&1 && firewall-cmd --state >/dev/null 2>&1; then
+  firewall-cmd --zone=trusted --remove-interface=` + ifaceName + ` >/dev/null 2>&1 || true
+  firewall-cmd --permanent --zone=trusted --remove-interface=` + ifaceName + ` >/dev/null 2>&1 || true
+fi
 rm -f /usr/local/bin/awg /usr/local/bin/awg-quick /usr/local/bin/amneziawg-go
 rm -rf /etc/amnezia
 rm -rf ` + goRoot + `
