@@ -44,6 +44,18 @@ func (s Service) IsActive(ctx context.Context) bool {
 	return strings.TrimSpace(res.Stdout) == "active"
 }
 
+// Recover restarts a service whose stop step fails, as awg-quick's does once
+// its interface is gone. systemd starts it again regardless; OpenRC won't
+// start a service it couldn't stop, so its state is reset (zapped) first.
+// Callers should check the service came back rather than trust the result.
+func (s Service) Recover(ctx context.Context) (Result, error) {
+	if IsOpenRC() {
+		_, _ = Run(ctx, "rc-service", s.OpenRC, "zap")
+		return Run(ctx, "rc-service", s.OpenRC, "start")
+	}
+	return Run(ctx, "systemctl", "restart", s.Systemd)
+}
+
 // EnableAndRestart makes the service start at boot and (re)starts it now.
 func (s Service) EnableAndRestart(ctx context.Context) (Result, error) {
 	name := s.Name()

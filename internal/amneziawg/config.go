@@ -77,6 +77,19 @@ func removePeerBlock(path, publicKey string) error {
 	return writeFileAtomic(path, []byte(result), 0o600)
 }
 
+// postDownCommands returns the PostDown hooks of an awg0.conf-style INI text,
+// with %i expanded to the interface name as awg-quick does.
+func postDownCommands(conf, iface string) []string {
+	var cmds []string
+	for _, line := range strings.Split(conf, "\n") {
+		key, val, ok := strings.Cut(strings.TrimSpace(line), "=")
+		if ok && strings.EqualFold(strings.TrimSpace(key), "PostDown") {
+			cmds = append(cmds, strings.ReplaceAll(strings.TrimSpace(val), "%i", iface))
+		}
+	}
+	return cmds
+}
+
 func blockHasPublicKey(lines []string, publicKey string) bool {
 	for _, line := range lines {
 		key, val, ok := strings.Cut(strings.TrimSpace(line), "=")

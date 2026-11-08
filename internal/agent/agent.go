@@ -32,7 +32,14 @@ type Agent struct {
 	// next poll, so a backend restart doesn't lose an install's outcome.
 	// Kept in memory only: an agent restart drops them.
 	unsent []protocol.ActionResult
+
+	// lastHeal is when a dead AmneziaWG daemon was last restarted.
+	lastHeal time.Time
 }
+
+// healRetryDelay spaces out restarts of a dead AmneziaWG daemon, so one that
+// keeps dying isn't restarted on every poll.
+const healRetryDelay = 5 * time.Minute
 
 // maxUnsent bounds the resend queue; past it the oldest result is dropped.
 const maxUnsent = 100
@@ -101,6 +108,10 @@ func (a *Agent) tick(ctx context.Context) bool {
 	if !a.flushUnsent(ctx) {
 		return false
 	}
+
+	// Before the status goes out, so it reports awg0 as it is after any
+	// restart.
+	a.healAmneziaWG(ctx)
 
 	req := protocol.PollRequest{
 		AgentID:   a.cfg.AgentID,
@@ -207,6 +218,24 @@ func (a *Agent) flushUnsent(ctx context.Context) bool {
 		a.unsent = a.unsent[1:]
 	}
 	return true
+}
+
+// healAmneziaWG restarts awg0 if its daemon died while the service still
+// counts as started; see amneziawg.Manager.RestartIfDown.
+func (a *Agent) healAmneziaWG(ctx context.Context) {
+	if time.Since(a.lastHeal) < healRetryDelay {
+		return
+	}
+	restarted, err := a.amneziawg.RestartIfDown(ctx)
+	if !restarted {
+		return
+	}
+	a.lastHeal = time.Now()
+	if err != nil {
+		log.Printf("AmneziaWG daemon was down, restart failed: %v", err)
+		return
+	}
+	log.Printf("AmneziaWG daemon was down, restarted it")
 }
 
 func (a *Agent) status(ctx context.Context) protocol.AgentStatus {

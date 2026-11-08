@@ -8,7 +8,9 @@ package amneziawg
 import (
 	"context"
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -47,9 +49,56 @@ func (m *Manager) IsInstalled() bool {
 	return errAwg == nil && errQuick == nil
 }
 
-// IsRunning reports whether the awg0 service is active.
+// IsRunning reports whether awg0 is actually up. The awg0 service is a
+// oneshot that still counts as active after the amneziawg-go daemon it
+// started has exited, so the interface, which goes away with the daemon, is
+// checked too.
 func (m *Manager) IsRunning(ctx context.Context) bool {
-	return service.IsActive(ctx)
+	return service.IsActive(ctx) && interfaceUp()
+}
+
+// sysClassNet is where the kernel lists network interfaces; tests point it
+// elsewhere.
+var sysClassNet = "/sys/class/net"
+
+// interfaceUp reports whether the awg0 network interface exists.
+func interfaceUp() bool {
+	_, err := os.Stat(filepath.Join(sysClassNet, ifaceName))
+	return err == nil
+}
+
+// RestartIfDown brings awg0 back when its daemon has died but the service
+// still counts as started, which nothing else notices: the unit is a
+// oneshot, so systemd has no process to watch. It reports whether it tried.
+// A service stopped on purpose, or an AmneziaWG that isn't installed, is
+// left alone.
+func (m *Manager) RestartIfDown(ctx context.Context) (bool, error) {
+	if !m.IsInstalled() || interfaceUp() || !service.IsActive(ctx) {
+		return false, nil
+	}
+	// awg-quick down can't run PostDown once the interface is gone, so the
+	// firewall rules PostUp added are still in place. Remove them first, or
+	// the restart's PostUp adds a second copy.
+	m.runPostDown(ctx)
+	// The restart's stop step fails the same way (no interface to take
+	// down), so whether awg0 came back is judged by waitRunning instead.
+	res, _ := service.Recover(ctx)
+	if !m.waitRunning(ctx) {
+		return true, fmt.Errorf("%s did not come back up: %s", service.Name(), res.Combined())
+	}
+	return true, nil
+}
+
+// runPostDown runs the config's PostDown commands, as awg-quick down would.
+// Failures are ignored: a rule that's already gone is fine.
+func (m *Manager) runPostDown(ctx context.Context) {
+	data, err := readFile(m.ConfigPath)
+	if err != nil {
+		return
+	}
+	for _, cmd := range postDownCommands(string(data), ifaceName) {
+		_, _ = system.RunShell(ctx, cmd)
+	}
 }
 
 // Version returns the installed awg (control tool) version string, or "" if
